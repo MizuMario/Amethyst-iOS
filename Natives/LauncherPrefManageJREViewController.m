@@ -62,15 +62,15 @@ static WFWorkflowProgressView* currentProgressView;
     self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
 
     self.javaRuntimes = @{
-        @(DEFAULT_JRE): @[@"preference.manage_runtime.default.1165", @"preference.manage_runtime.default.117", @"launcher.menu.execute_jar"]
+        @(DEFAULT_JRE): @[@"preference.manage_runtime.default.1165", @"preference.manage_runtime.default.117", @"preference.manage_runtime.default.126", @"launcher.menu.execute_jar"]
     }.mutableCopy;
     self.sortedJavaVersions = @[@(DEFAULT_JRE)].mutableCopy;
 
-    self.selectedRTTags = @[@"1_16_5_older", @"1_17_newer", @"execute_jar"];
+    self.selectedRTTags = @[@"1_16_5_older", @"1_17_newer", @"1_26_newer", @"execute_jar"];
     self.selectedRuntimes = getPrefObject(@"java.java_homes");
 
     NSString *internalPath = [NSString stringWithFormat:@"%@/java_runtimes", NSBundle.mainBundle.bundlePath];
-    NSString *externalPath = [NSString stringWithFormat:@"%s/java_runtimes", getenv("POJAV_HOME")];
+    NSString *externalPath = [NSString stringWithFormat:@"%s/java_runtimes", getenv("AME_HOME")];
     [self listJREInPath:internalPath markInternal:YES];
     [self listJREInPath:externalPath markInternal:NO];
 
@@ -106,7 +106,7 @@ static WFWorkflowProgressView* currentProgressView;
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
 
-        NSString *outPath = [NSString stringWithFormat:@"%s/java_runtimes/%@", getenv("POJAV_HOME"),
+        NSString *outPath = [NSString stringWithFormat:@"%s/java_runtimes/%@", getenv("AME_HOME"),
             [url.path substringToIndex:url.path.length-7].lastPathComponent];
         NSString *error = [LauncherPrefManageJREViewController extractTarXZ:url.path
         to:outPath progress:totalProgress fileProgress:fileProgress
@@ -236,7 +236,7 @@ static WFWorkflowProgressView* currentProgressView;
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         unsigned long long folderSize = 0;
         NSString *directory = [NSString stringWithFormat:@"%@/java_runtimes/%@",
-            isInternal ? NSBundle.mainBundle.bundlePath : @(getenv("POJAV_HOME")),
+            isInternal ? NSBundle.mainBundle.bundlePath : @(getenv("AME_HOME")),
             name];
         [NSFileManager.defaultManager nr_getAllocatedSize:&folderSize ofDirectoryAtURL:[NSURL fileURLWithPath:directory] error:nil];
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -252,8 +252,10 @@ static WFWorkflowProgressView* currentProgressView;
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:NO];
     if (indexPath.section == 0) {
-        [self tableView:tableView openPickerAtIndexPath:indexPath
-            minVersion:(indexPath.row==1 ? 17 : 8)];
+        NSInteger minVersion = 8;
+        if (indexPath.row == 1) minVersion = 17;
+        else if (indexPath.row == 2) minVersion = 25;
+        [self tableView:tableView openPickerAtIndexPath:indexPath minVersion:minVersion];
         return;
     } else if (self.sortedJavaVersions[indexPath.section].intValue == INVALID_JRE) {
         // TODO: do something, like alert explaining that the runtime has missing files
@@ -350,7 +352,7 @@ styleForMenuWithConfiguration:(UIContextMenuConfiguration *)configuration
     confirmAlert.popoverPresentationController.sourceRect = cell.bounds;
     UIAlertAction *ok = [UIAlertAction actionWithTitle:localize(@"OK", nil) style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
         NSError *error;
-        NSString *directory = [NSString stringWithFormat:@"%s/java_runtimes/%@", getenv("POJAV_HOME"), cell.textLabel.text];
+        NSString *directory = [NSString stringWithFormat:@"%s/java_runtimes/%@", getenv("AME_HOME"), cell.textLabel.text];
         [NSFileManager.defaultManager removeItemAtPath:directory error:&error];
         if(!error) {
             [self removeRuntimeAtIndexPath:indexPath];

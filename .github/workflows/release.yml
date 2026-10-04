@@ -37,6 +37,15 @@ jobs:
       - name: Checkout repository submodules
         run: git submodule update --init --recursive
 
+      - name: Get JRE25
+        run: |
+          mkdir -p depends
+          curl -fL --retry 3 \
+            https://assets.angelauramc.dev/openjdk/ios-arm64/jre25-ios-aarch64.zip \
+            -o depends/jre25-ios-aarch64.zip
+          unzip -o depends/jre25-ios-aarch64.zip -d depends
+          rm depends/jre25-ios-aarch64.zip
+
       - name: Get gl4es latest commit hash
         id: gl4es-sha
         run: echo "::set-output name=sha::$(echo $(git ls-remote https://github.com/PojavLauncherTeam/gl4es-114-extra refs/heads/master | grep -io '^\S*'))"

@@ -52,11 +52,13 @@
                 @"0": @{
                     @"1_16_5_older": @"8",
                     @"1_17_newer": @"17",
+                    @"1_26_newer": @"25",
                     @"execute_jar": @"8"
                 }.mutableCopy,
                 @"8": @"internal",
                 @"17": @"internal",
-                @"21": @"internal"
+                @"21": @"internal",
+                @"25": @"internal"
             }.mutableCopy,
             @"java_args": @"",
             @"env_variables": @"",
@@ -133,10 +135,10 @@
 
 - (id)initWithAutomaticMigrator {
     self = [super init];
-    self.globalPath = [@(getenv("POJAV_HOME")) stringByAppendingPathComponent:@"launcher_preferences_v2.plist"];
+    self.globalPath = [@(getenv("AME_HOME")) stringByAppendingPathComponent:@"launcher_preferences_v2.plist"];
     NSMutableDictionary *pref = [NSMutableDictionary dictionaryWithContentsOfFile:self.globalPath];
 
-    NSString *oldPath = [@(getenv("POJAV_HOME")) stringByAppendingPathComponent:@"launcher_preferences.plist"];
+    NSString *oldPath = [@(getenv("AME_HOME")) stringByAppendingPathComponent:@"launcher_preferences.plist"];
     NSMutableDictionary *oldPref = [NSMutableDictionary dictionaryWithContentsOfFile:oldPath];
 
     if (pref || !oldPref[@"env_vars"]) {
