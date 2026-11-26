@@ -9,28 +9,37 @@
 
 static EGLDisplay g_EglDisplay;
 static egl_library handle;
+static void *g_renderer_handle;
 
 void dlsym_EGL() {
-    void* dl_handle = dlopen("@rpath/libtinygl4angle.dylib", RTLD_GLOBAL);
-    NSCAssert(dl_handle, @(dlerror()));
-    handle.eglBindAPI = dlsym(dl_handle, "eglBindAPI");
-    handle.eglChooseConfig = dlsym(dl_handle, "eglChooseConfig");
-    handle.eglCreateContext = dlsym(dl_handle, "eglCreateContext");
-    handle.eglCreateWindowSurface = dlsym(dl_handle, "eglCreateWindowSurface");
-    handle.eglDestroyContext = dlsym(dl_handle, "eglDestroyContext");
-    handle.eglDestroySurface = dlsym(dl_handle, "eglDestroySurface");
-    handle.eglGetConfigAttrib = dlsym(dl_handle, "eglGetConfigAttrib");
-    handle.eglGetCurrentContext = dlsym(dl_handle, "eglGetCurrentContext");
-    handle.eglGetDisplay = dlsym(dl_handle, "eglGetDisplay");
-    handle.eglGetError = dlsym(dl_handle, "eglGetError");
-    handle.eglGetPlatformDisplay = dlsym(dl_handle, "eglGetPlatformDisplay");
-    handle.eglInitialize = dlsym(dl_handle, "eglInitialize");
-    handle.eglMakeCurrent = dlsym(dl_handle, "eglMakeCurrent");
-    handle.eglSwapBuffers = dlsym(dl_handle, "eglSwapBuffers");
-    handle.eglReleaseThread = dlsym(dl_handle, "eglReleaseThread");
-    handle.eglSwapInterval = dlsym(dl_handle, "eglSwapInterval");
-    handle.eglTerminate = dlsym(dl_handle, "eglTerminate");
-    handle.eglGetCurrentSurface = dlsym(dl_handle, "eglGetCurrentSurface");
+    // EGL and GL must come from the same renderer.  Loading EGL from
+    // TinyGL4ANGLE while MobileGlues supplies the GL entry points creates a
+    // context that MobileGlues cannot see; glGetString then returns NULL and
+    // LWJGL stops during capability initialization.
+    const char *renderer = getenv("RENDERER");
+    const char *eglLibrary = (renderer && !strcmp(renderer, RENDERER_NAME_MOBILEGLUES))
+        ? RENDERER_NAME_MOBILEGLUES
+        : RENDERER_NAME_MTL_ANGLE;
+    g_renderer_handle = dlopen([NSString stringWithFormat:@"@rpath/%s", eglLibrary].UTF8String, RTLD_GLOBAL);
+    NSCAssert(g_renderer_handle, @(dlerror()));
+    handle.eglBindAPI = dlsym(g_renderer_handle, "eglBindAPI");
+    handle.eglChooseConfig = dlsym(g_renderer_handle, "eglChooseConfig");
+    handle.eglCreateContext = dlsym(g_renderer_handle, "eglCreateContext");
+    handle.eglCreateWindowSurface = dlsym(g_renderer_handle, "eglCreateWindowSurface");
+    handle.eglDestroyContext = dlsym(g_renderer_handle, "eglDestroyContext");
+    handle.eglDestroySurface = dlsym(g_renderer_handle, "eglDestroySurface");
+    handle.eglGetConfigAttrib = dlsym(g_renderer_handle, "eglGetConfigAttrib");
+    handle.eglGetCurrentContext = dlsym(g_renderer_handle, "eglGetCurrentContext");
+    handle.eglGetDisplay = dlsym(g_renderer_handle, "eglGetDisplay");
+    handle.eglGetError = dlsym(g_renderer_handle, "eglGetError");
+    handle.eglGetPlatformDisplay = dlsym(g_renderer_handle, "eglGetPlatformDisplay");
+    handle.eglInitialize = dlsym(g_renderer_handle, "eglInitialize");
+    handle.eglMakeCurrent = dlsym(g_renderer_handle, "eglMakeCurrent");
+    handle.eglSwapBuffers = dlsym(g_renderer_handle, "eglSwapBuffers");
+    handle.eglReleaseThread = dlsym(g_renderer_handle, "eglReleaseThread");
+    handle.eglSwapInterval = dlsym(g_renderer_handle, "eglSwapInterval");
+    handle.eglTerminate = dlsym(g_renderer_handle, "eglTerminate");
+    handle.eglGetCurrentSurface = dlsym(g_renderer_handle, "eglGetCurrentSurface");
 }
 
 static bool gl_init() {
@@ -89,7 +98,8 @@ gl_render_window_t* gl_init_context(gl_render_window_t *share) {
         NSDebugLog(@"EGLBridge: Binding to OpenGL ES");
         bindResult = handle.eglBindAPI(EGL_OPENGL_ES_API);
     }
-    if (!bindResult) NSDebugLog(@"EGLBridge: bind failed: %p\n", handle.eglGetError());
+    if (!bindResult) NSDebugLog(@"EGLBridge: bind failed: 0x%x", handle.eglGetError());
+    NSDebugLog(@"EGLBridge: Creating window surface");
 
     bundle->surface = handle.eglCreateWindowSurface(g_EglDisplay, bundle->config, (__bridge EGLNativeWindowType)SurfaceViewController.surface.layer, NULL);
     if (!bundle->surface) {
@@ -97,6 +107,7 @@ gl_render_window_t* gl_init_context(gl_render_window_t *share) {
         free(bundle);
         return NULL;
     }
+    NSDebugLog(@"EGLBridge: Window surface created");
 
     const EGLint ctx_attribs[] = {
         EGL_CONTEXT_CLIENT_VERSION, 3,
@@ -108,6 +119,7 @@ gl_render_window_t* gl_init_context(gl_render_window_t *share) {
         free(bundle);
         return NULL;
     }
+    NSDebugLog(@"EGLBridge: Context created");
     //NSDebugLog(@"EGLBridge: Created CTX pointer = %p (source = %p)", bundle->context, share?share->context:0);
 
     return bundle;
@@ -123,14 +135,98 @@ void gl_make_current(gl_render_window_t* bundle) {
 
     if(handle.eglMakeCurrent(g_EglDisplay, bundle->surface, bundle->surface, bundle->context)) {
         currentBundle = (basic_render_window_t *)bundle;
+        NSDebugLog(@"EGLBridge: Context made current");
+
+        // Validate the renderer entry points before control returns to LWJGL.
+        // If this blocks, the failure is inside the MobileGlues GL dispatch;
+        // if it succeeds, the remaining initialization is on the Java side.
+        typedef const GLubyte *(*gl_get_string_fn)(GLenum);
+        gl_get_string_fn getString = (gl_get_string_fn)dlsym(g_renderer_handle, "glGetString");
+        if (getString) {
+            const GLubyte *version = getString(GL_VERSION);
+            const GLubyte *vendor = getString(GL_VENDOR);
+            NSDebugLog(@"EGLBridge: GL_VERSION=%s GL_VENDOR=%s",
+                       version ? (const char *)version : "(null)",
+                       vendor ? (const char *)vendor : "(null)");
+            typedef void (*gl_get_integer_fn)(GLenum, GLint *);
+            typedef const GLubyte *(*gl_get_string_i_fn)(GLenum, GLuint);
+            gl_get_integer_fn getInteger = (gl_get_integer_fn)dlsym(g_renderer_handle, "glGetIntegerv");
+            gl_get_string_i_fn getStringI = (gl_get_string_i_fn)dlsym(g_renderer_handle, "glGetStringi");
+            if (getInteger) {
+                GLint major = 0, minor = 0, profile = 0, extensionCount = 0;
+                getInteger(GL_MAJOR_VERSION, &major);
+                getInteger(GL_MINOR_VERSION, &minor);
+                getInteger(GL_CONTEXT_PROFILE_MASK, &profile);
+                getInteger(GL_NUM_EXTENSIONS, &extensionCount);
+                NSDebugLog(@"EGLBridge: GL_CONTEXT=%d.%d profile=0x%x extensions=%d",
+                           major, minor, profile, extensionCount);
+                NSArray<NSString *> *sodiumExtensions = @[
+                    @"GL_ARB_buffer_storage", @"GL_ARB_direct_state_access",
+                    @"GL_ARB_vertex_attrib_binding", @"GL_ARB_multi_draw_indirect",
+                    @"GL_ARB_shader_storage_buffer_object", @"GL_ARB_compute_shader",
+                    @"GL_ARB_timer_query", @"GL_ARB_texture_storage",
+                    @"GL_ARB_invalidate_subdata"
+                ];
+                NSMutableArray<NSString *> *reportedSodiumExtensions = [NSMutableArray array];
+                NSMutableArray<NSString *> *missingSodiumExtensions = sodiumExtensions.mutableCopy;
+                if (getStringI && extensionCount > 0 && extensionCount <= 4096) {
+                    for (GLint i = 0; i < extensionCount; i++) {
+                        const GLubyte *extension = getStringI(GL_EXTENSIONS, (GLuint)i);
+                        if (!extension) continue;
+                        NSString *name = @((const char *)extension);
+                        if ([sodiumExtensions containsObject:name]) {
+                            [reportedSodiumExtensions addObject:name];
+                            [missingSodiumExtensions removeObject:name];
+                        }
+                    }
+                    NSDebugLog(@"EGLBridge: Sodium GL extensions present=%@ missing=%@",
+                               [reportedSodiumExtensions componentsJoinedByString:@" "],
+                               [missingSodiumExtensions componentsJoinedByString:@" "]);
+                } else {
+                    NSDebugLog(@"EGLBridge: glGetStringi unavailable or extension count invalid");
+                }
+            } else {
+                NSDebugLog(@"EGLBridge: glGetIntegerv entry point is unavailable");
+            }
+
+            NSArray<NSString *> *probeSymbols = @[
+                @"glBufferStorage", @"glMapBufferRange", @"glDrawElementsBaseVertex",
+                @"glBindVertexArray", @"glVertexAttribDivisor", @"glGetIntegeri_v",
+                @"glDispatchCompute", @"glMemoryBarrier", @"glBindBufferRange",
+                @"glTexStorage2D", @"glBlitFramebuffer", @"glGetStringi"
+            ];
+            NSMutableArray<NSString *> *availableSymbols = [NSMutableArray array];
+            NSMutableArray<NSString *> *missingSymbols = [NSMutableArray array];
+            for (NSString *symbol in probeSymbols) {
+                if (dlsym(g_renderer_handle, symbol.UTF8String)) {
+                    [availableSymbols addObject:symbol];
+                } else {
+                    [missingSymbols addObject:symbol];
+                }
+            }
+            NSDebugLog(@"EGLBridge: GL symbol probe available=%@ missing=%@",
+                       [availableSymbols componentsJoinedByString:@" "],
+                       [missingSymbols componentsJoinedByString:@" "]);
+        } else {
+            NSDebugLog(@"EGLBridge: glGetString entry point is unavailable");
+        }
     } else {
         NSLog(@"EGLBridge: eglMakeCurrent returned with error: 0x%x", handle.eglGetError());
     }
 }
 
 void gl_swap_buffers() {
-    if (!handle.eglSwapBuffers(g_EglDisplay, currentBundle->gl.surface) && handle.eglGetError() == EGL_BAD_SURFACE) {
-        NSLog(@"eglSwapBuffers error 0x%x", handle.eglGetError());
+    if (!g_EglDisplay || !currentBundle || !handle.eglSwapBuffers || !handle.eglGetError) {
+        NSDebugLog(@"EGLBridge: SwapBuffers skipped (display/context/function unavailable)");
+        return;
+    }
+    EGLBoolean result = handle.eglSwapBuffers(g_EglDisplay, currentBundle->gl.surface);
+    if (!result) {
+        EGLint error = handle.eglGetError();
+        NSLog(@"EGLBridge: eglSwapBuffers failed: 0x%x", error);
+        if (error == EGL_BAD_SURFACE) {
+            NSDebugLog(@"EGLBridge: SwapBuffers surface is invalid");
+        }
         //stopSwapBuffers = true;
         //closeGLFWWindow();
     }

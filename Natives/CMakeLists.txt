@@ -47,9 +47,19 @@ target_link_libraries(awt_xawt
   awt_headless
 )
 
+# JNI native methods implemented in the app executable are not discoverable
+# through the JVM's class-loader native-library lookup. This small dylib
+# registers the SDL bridge methods against their exported executable symbols.
+add_library(amethyst_sdl3_jni SHARED sdl3_jni_registrar.m)
+target_link_libraries(amethyst_sdl3_jni "-framework Foundation")
+set_target_properties(amethyst_sdl3_jni PROPERTIES
+  OUTPUT_NAME amethyst_sdl3_jni
+  INSTALL_NAME_DIR "@rpath"
+)
+
 set(CMAKE_FRAMEWORK_PATH "${CMAKE_CURRENT_LIST_DIR}/resources/Frameworks")
 
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -rpath @executable_path/Frameworks -rpath @loader_path/Frameworks")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -rdynamic -Wl,-export_dynamic -rpath @executable_path/Frameworks -rpath @loader_path/Frameworks")
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -rpath @executable_path/Frameworks -rpath @loader_path/Frameworks")
 
 # ANGLE wrapper for 1.17+
@@ -99,6 +109,9 @@ add_executable(AngelAuraAmethyst
   main.m
   main_hook.m
   JavaLauncher.m
+  LWJGLVersions.m
+  sdl3_hook.m
+  sdl3_gl_layer.m
   external/fishhook/fishhook.c
   UIKit+hook.m
 
@@ -108,6 +121,7 @@ add_executable(AngelAuraAmethyst
 
   ctxbridges/gl_bridge.m
   ctxbridges/osm_bridge.m
+  ctxbridges/vk_bridge.m
  
   customcontrols/ControlButton.m
   customcontrols/ControlDrawer.m
@@ -196,6 +210,7 @@ target_link_libraries(AngelAuraAmethyst
   "-framework CoreMotion"
   "-framework GameController"
   "-framework IOKit"
+  "-framework Metal"
   "-framework QuartzCore"
   "-framework UIKit"
   "-framework UniformTypeIdentifiers"

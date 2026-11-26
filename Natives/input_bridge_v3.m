@@ -15,6 +15,7 @@
 #include <assert.h>
 #include <dlfcn.h>
 #include <libgen.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <stdatomic.h>
 
@@ -22,8 +23,11 @@
 #include "glfw_keycodes.h"
 #include "ios_uikit_bridge.h"
 #include "utils.h"
+#include "sdl3_hook.h"
 
 #include "JavaLauncher.h"
+
+volatile bool AMControllerPassthrough = false;
 
 jint (*orig_ProcessImpl_forkAndExec)(JNIEnv *env, jobject process, jint mode, jbyteArray helperpath, jbyteArray prog, jbyteArray argBlock, jint argc, jbyteArray envBlock, jint envc, jbyteArray dir, jintArray std_fds, jboolean redirectErrorStream);
 jlong (*orig_ProcessHandleImpl_isAlive0)(JNIEnv *env, jclass clazz, jlong jpid);
@@ -212,6 +216,12 @@ void registerOpenHandler(JNIEnv *env) {
 void JNI_OnLoadGLFW() {
     vmGlfwClass = (*runtimeJNIEnvPtr)->NewGlobalRef(runtimeJNIEnvPtr, (*runtimeJNIEnvPtr)->FindClass(runtimeJNIEnvPtr, "org/lwjgl/glfw/GLFW"));
     method_internalWindowSizeChanged = (*runtimeJNIEnvPtr)->GetStaticMethodID(runtimeJNIEnvPtr, vmGlfwClass, "internalWindowSizeChanged", "(JII)V");
+    method_dispatchCursorPosCallback = (*runtimeJNIEnvPtr)->GetStaticMethodID(runtimeJNIEnvPtr, vmGlfwClass, "dispatchCursorPosCallback", "(JDD)V");
+    method_dispatchCharCallback = (*runtimeJNIEnvPtr)->GetStaticMethodID(runtimeJNIEnvPtr, vmGlfwClass, "dispatchCharCallback", "(JI)V");
+    method_dispatchCharModsCallback = (*runtimeJNIEnvPtr)->GetStaticMethodID(runtimeJNIEnvPtr, vmGlfwClass, "dispatchCharModsCallback", "(JII)V");
+    method_dispatchKeyCallback = (*runtimeJNIEnvPtr)->GetStaticMethodID(runtimeJNIEnvPtr, vmGlfwClass, "dispatchKeyCallback", "(JIIII)V");
+    method_dispatchMouseButtonCallback = (*runtimeJNIEnvPtr)->GetStaticMethodID(runtimeJNIEnvPtr, vmGlfwClass, "dispatchMouseButtonCallback", "(JIII)V");
+    method_dispatchScrollCallback = (*runtimeJNIEnvPtr)->GetStaticMethodID(runtimeJNIEnvPtr, vmGlfwClass, "dispatchScrollCallback", "(JDD)V");
     jfieldID field_keyDownBuffer = (*runtimeJNIEnvPtr)->GetStaticFieldID(runtimeJNIEnvPtr, vmGlfwClass, "keyDownBuffer", "Ljava/nio/ByteBuffer;");
     jobject keyDownBufferJ = (*runtimeJNIEnvPtr)->GetStaticObjectField(runtimeJNIEnvPtr, vmGlfwClass, field_keyDownBuffer);
     keyDownBuffer = (*runtimeJNIEnvPtr)->GetDirectBufferAddress(runtimeJNIEnvPtr, keyDownBufferJ);
@@ -229,6 +239,14 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
     }
 
     return JNI_VERSION_1_4;
+}
+
+static void traceAndClearCallbackException(const char *callbackName) {
+    if ((*runtimeJNIEnvPtr)->ExceptionCheck(runtimeJNIEnvPtr)) {
+        fprintf(stderr, "[InputTrace] Java %s callback raised an exception\n", callbackName);
+        (*runtimeJNIEnvPtr)->ExceptionDescribe(runtimeJNIEnvPtr);
+        (*runtimeJNIEnvPtr)->ExceptionClear(runtimeJNIEnvPtr);
+    }
 }
 
 // Should be?
@@ -263,36 +281,74 @@ void handleFramebufferSizeJava(void* window, int w, int h) {
 }
 
 void pojavPumpEvents(void* window) {
+    static atomic_uint_fast64_t pollSequence = 0;
+    uint64_t sequence = atomic_fetch_add_explicit(&pollSequence, 1, memory_order_relaxed) + 1;
+    BOOL tracePoll = sequence <= 5 || sequence % 120 == 0;
     static BOOL setInputReady = NO;
     if(!setInputReady) {
         setInputReady = YES;
+        fprintf(stderr, "[InputTrace] first glfw poll: window=%p inputReady=%d queued=%d\n", window, isInputReady, isUseStackQueueCall);
         CallbackBridge_nativeSetInputReady(YES);
     }
-    //__android_log_print(ANDROID_LOG_INFO, "input_bridge_v3", "pojavPumpevents %d", eventCounter);
     size_t counter = atomic_load_explicit(&eventCounter, memory_order_acquire);
+    if (tracePoll) fprintf(stderr, "[InputTrace] poll #%llu begin window=%p queuedEvents=%zu cursor=(%.1f,%.1f)\n", sequence, window, counter, cursorX, cursorY);
     if((cLastX != cursorX || cLastY != cursorY) && GLFW_invoke_CursorPos) {
         cLastX = cursorX;
         cLastY = cursorY;
-        if (isUseStackQueueCall)
-            GLFW_invoke_CursorPos(window, cursorX, cursorY);
+        if (isUseStackQueueCall) {
+            fprintf(stderr, "[InputTrace] cursor callback begin poll=%llu pos=(%.1f,%.1f)\n", sequence, cursorX, cursorY);
+            if (runtimeJNIEnvPtr && vmGlfwClass && method_dispatchCursorPosCallback) {
+                (*runtimeJNIEnvPtr)->CallStaticVoidMethod(runtimeJNIEnvPtr, vmGlfwClass,
+                        method_dispatchCursorPosCallback, (jlong) window,
+                        (jdouble) cursorX, (jdouble) cursorY);
+                if ((*runtimeJNIEnvPtr)->ExceptionCheck(runtimeJNIEnvPtr)) {
+                    fprintf(stderr, "[InputTrace] Java cursor callback raised an exception\n");
+                    (*runtimeJNIEnvPtr)->ExceptionDescribe(runtimeJNIEnvPtr);
+                    (*runtimeJNIEnvPtr)->ExceptionClear(runtimeJNIEnvPtr);
+                }
+            } else {
+                fprintf(stderr, "[InputTrace] Java cursor dispatcher unavailable; using native callback\n");
+                GLFW_invoke_CursorPos(window, cursorX, cursorY);
+            }
+            fprintf(stderr, "[InputTrace] cursor callback end poll=%llu\n", sequence);
+        }
     }
     for(size_t i = 0; i < counter; i++) {
         GLFWInputEvent event = events[i];
+        BOOL traceEvent = event.type == EVENT_TYPE_MOUSE_BUTTON || event.type == EVENT_TYPE_KEY || tracePoll;
+        if (traceEvent) fprintf(stderr, "[InputTrace] event begin poll=%llu index=%zu type=%d values=(%d,%d,%d,%d)\n", sequence, i, event.type, event.i1, event.i2, event.i3, event.i4);
         switch(event.type) {
             case EVENT_TYPE_CHAR:
-                if(GLFW_invoke_Char) GLFW_invoke_Char(window, event.i1);
+                if (method_dispatchCharCallback) {
+                    (*runtimeJNIEnvPtr)->CallStaticVoidMethod(runtimeJNIEnvPtr, vmGlfwClass, method_dispatchCharCallback, (jlong) window, (jint) event.i1);
+                    traceAndClearCallbackException("char");
+                } else if(GLFW_invoke_Char) GLFW_invoke_Char(window, event.i1);
                 break;
             case EVENT_TYPE_CHAR_MODS:
-                if(GLFW_invoke_CharMods) GLFW_invoke_CharMods(window, event.i1, event.i2);
+                if (method_dispatchCharModsCallback) {
+                    (*runtimeJNIEnvPtr)->CallStaticVoidMethod(runtimeJNIEnvPtr, vmGlfwClass, method_dispatchCharModsCallback, (jlong) window, (jint) event.i1, (jint) event.i2);
+                    traceAndClearCallbackException("char mods");
+                } else if(GLFW_invoke_CharMods) GLFW_invoke_CharMods(window, event.i1, event.i2);
                 break;
             case EVENT_TYPE_KEY:
-                if(GLFW_invoke_Key) GLFW_invoke_Key(window, event.i1, event.i2, event.i3, event.i4);
+                if (method_dispatchKeyCallback) {
+                    (*runtimeJNIEnvPtr)->CallStaticVoidMethod(runtimeJNIEnvPtr, vmGlfwClass, method_dispatchKeyCallback, (jlong) window, (jint) event.i1, (jint) event.i2, (jint) event.i3, (jint) event.i4);
+                    traceAndClearCallbackException("key");
+                } else if(GLFW_invoke_Key) GLFW_invoke_Key(window, event.i1, event.i2, event.i3, event.i4);
                 break;
             case EVENT_TYPE_MOUSE_BUTTON:
-                if(GLFW_invoke_MouseButton) GLFW_invoke_MouseButton(window, event.i1, event.i2, event.i3);
+                if (traceEvent) fprintf(stderr, "[InputTrace] Java mouse callback begin poll=%llu\n", sequence);
+                if (method_dispatchMouseButtonCallback) {
+                    (*runtimeJNIEnvPtr)->CallStaticVoidMethod(runtimeJNIEnvPtr, vmGlfwClass, method_dispatchMouseButtonCallback, (jlong) window, (jint) event.i1, (jint) event.i2, (jint) event.i3);
+                    traceAndClearCallbackException("mouse button");
+                } else if(GLFW_invoke_MouseButton) GLFW_invoke_MouseButton(window, event.i1, event.i2, event.i3);
+                if (traceEvent) fprintf(stderr, "[InputTrace] Java mouse callback end poll=%llu\n", sequence);
                 break;
             case EVENT_TYPE_SCROLL:
-                if(GLFW_invoke_Scroll) GLFW_invoke_Scroll(window, event.f1, event.f2);
+                if (method_dispatchScrollCallback) {
+                    (*runtimeJNIEnvPtr)->CallStaticVoidMethod(runtimeJNIEnvPtr, vmGlfwClass, method_dispatchScrollCallback, (jlong) window, (jdouble) event.f1, (jdouble) event.f2);
+                    traceAndClearCallbackException("scroll");
+                } else if(GLFW_invoke_Scroll) GLFW_invoke_Scroll(window, event.f1, event.f2);
                 break;
             case EVENT_TYPE_FRAMEBUFFER_SIZE:
                 handleFramebufferSizeJava(window, event.i1, event.i2);
@@ -303,8 +359,10 @@ void pojavPumpEvents(void* window) {
                 if(GLFW_invoke_WindowSize) GLFW_invoke_WindowSize(window, event.i1, event.i2);
                 break;
         }
+        if (traceEvent) fprintf(stderr, "[InputTrace] event end poll=%llu index=%zu type=%d\n", sequence, i, event.type);
     }
     atomic_store_explicit(&eventCounter, counter, memory_order_release);
+    if (tracePoll) fprintf(stderr, "[InputTrace] poll #%llu end processed=%zu\n", sequence, counter);
 }
 void pojavRewindEvents() {
     atomic_store_explicit(&eventCounter, 0, memory_order_release);
@@ -423,18 +481,32 @@ JNIEXPORT jboolean JNICALL Java_org_lwjgl_glfw_CallbackBridge_nativeIsGrabbing(J
 
 void CallbackBridge_nativeSetInputReady(BOOL inputReady) {
     isInputReady = inputReady;
+    fprintf(stderr, "[InputBridge] input readiness changed ready=%d window=%lx sdl=%d\n",
+            inputReady, showingWindow, AmethystSDL3InputActive());
+    fflush(stderr);
     if (inputReady) {
-        if (GLFW_invoke_FramebufferSize) {
-            hackFix18LWJGL(GLFW_invoke_FramebufferSize);
-            GLFW_invoke_FramebufferSize((void*) showingWindow, windowWidth, windowHeight);
-        }
-        if (GLFW_invoke_WindowSize) {
-            GLFW_invoke_FramebufferSize((void*) showingWindow, windowWidth, windowHeight);
+        // glfwPollEvents() is called while the Mojang loading screen is active,
+        // before LWJGL has finished installing its native callback pointers.
+        // Calling those pointers here can enter partially initialized Java
+        // state on the render thread. The Java bridge owns window dimensions;
+        // publish the initial framebuffer size through its existing JNI method.
+        if (runtimeJNIEnvPtr && vmGlfwClass && method_internalWindowSizeChanged) {
+            (*runtimeJNIEnvPtr)->CallStaticVoidMethod(runtimeJNIEnvPtr, vmGlfwClass,
+                    method_internalWindowSizeChanged, (jlong) showingWindow,
+                    (jint) windowWidth, (jint) windowHeight);
+            if ((*runtimeJNIEnvPtr)->ExceptionCheck(runtimeJNIEnvPtr)) {
+                NSLog(@"[InputBridge] Initial window-size notification raised a Java exception");
+                (*runtimeJNIEnvPtr)->ExceptionClear(runtimeJNIEnvPtr);
+            }
         }
     }
 }
 
 BOOL CallbackBridge_nativeSendChar(jchar codepoint /* jint codepoint */) {
+    if (AmethystSDL3InputActive()) {
+        AmethystSDL3ForwardInput(AM_SDL_INPUT_CHAR, codepoint, 0, 0, 0, 0, 0);
+        return YES;
+    }
     if (GLFW_invoke_Char && isInputReady) {
         if (isUseStackQueueCall) {
             sendData(EVENT_TYPE_CHAR, codepoint, 0, 0, 0);
@@ -466,7 +538,19 @@ JNIEXPORT void JNICALL Java_org_lwjgl_glfw_CallbackBridge_nativeSendCursorEnter(
 }
 */
 void CallbackBridge_nativeSendCursorPos(char event, CGFloat x, CGFloat y) {
+    if (AmethystSDL3InputActive() && isInputReady) {
+        // sendTouchPoint supplies absolute screen pixels. The SDL bridge's
+        // normalized flag means a 0..1 fraction, so setting it for ACTION_DOWN
+        // multiplies these pixel coordinates by the window size a second time
+        // and moves clicks far outside the game UI.
+        AmethystSDL3ForwardInput(AM_SDL_INPUT_CURSOR, event, 0, 0, 0, (float)x, (float)y);
+        return;
+    }
     if (!GLFW_invoke_CursorPos || !isInputReady) return;
+
+    if (event == ACTION_DOWN || event == ACTION_UP) {
+        fprintf(stderr, "[InputTrace] touch cursor event=%d xy=(%.1f,%.1f) grabbing=%d queued=%d window=%lx\n", event, x, y, isGrabbing, isUseStackQueueCall, showingWindow);
+    }
 
     switch (event) {
         case ACTION_DOWN:
@@ -529,7 +613,14 @@ char getKeyModifiers(int key, int action) {
 }
 
 void CallbackBridge_nativeSendKey(int key, int scancode, int action, int mods) {
+    if (AmethystSDL3InputActive() && isInputReady) {
+        AmethystSDL3ForwardInput(AM_SDL_INPUT_KEY, key, scancode, action, mods, 0, 0);
+        if (key == GLFW_KEY_LEFT_CONTROL) CallbackBridge_nativeSendKey(GLFW_KEY_LEFT_SUPER, 0, action, mods);
+        else if (key == GLFW_KEY_RIGHT_CONTROL) CallbackBridge_nativeSendKey(GLFW_KEY_RIGHT_SUPER, 0, action, mods);
+        return;
+    }
     if (GLFW_invoke_Key && isInputReady) {
+        fprintf(stderr, "[InputTrace] key received key=%d scan=%d action=%d mods=%d queued=%d window=%lx\n", key, scancode, action, mods, isUseStackQueueCall, showingWindow);
         keyDownBuffer[MAX(0, key-31)]=(jbyte)action;
         if (mods == 0) {
             mods = getKeyModifiers(key, action);
@@ -551,6 +642,14 @@ void CallbackBridge_nativeSendKey(int key, int scancode, int action, int mods) {
 }
 
 void CallbackBridge_nativeSendMouseButton(int button, int action, int mods) {
+    // UIKit can deliver the first tap just before SDL publishes its window. Do
+    // not silently drop it: the SDL bridge will queue this event until the
+    // game starts polling, while the input gate is opened during registration.
+    if (AmethystSDL3InputActive()) {
+        AmethystSDL3ForwardInput(AM_SDL_INPUT_BUTTON, button, action, mods, 0, 0, 0);
+        return;
+    }
+    fprintf(stderr, "[InputTrace] mouse received button=%d action=%d mods=%d ready=%d callback=%p queued=%d window=%lx\n", button, action, mods, isInputReady, GLFW_invoke_MouseButton, isUseStackQueueCall, showingWindow);
     if (isInputReady) {
         if (button == -1) {
         } else if (GLFW_invoke_MouseButton) {
@@ -560,8 +659,11 @@ void CallbackBridge_nativeSendMouseButton(int button, int action, int mods) {
 
             if (isUseStackQueueCall) {
                 sendData(EVENT_TYPE_MOUSE_BUTTON, button, action, mods, 0);
+                fprintf(stderr, "[InputTrace] mouse queued button=%d action=%d count=%zu\n", button, action, atomic_load_explicit(&eventCounter, memory_order_acquire));
             } else {
+                fprintf(stderr, "[InputTrace] direct mouse callback begin\n");
                 GLFW_invoke_MouseButton((void*) showingWindow, button, action, mods);
+                fprintf(stderr, "[InputTrace] direct mouse callback end\n");
             }
         }
     }
@@ -572,6 +674,9 @@ void CallbackBridge_nativeSendScreenSize(int width, int height) {
     windowHeight = height;
     
     if (isInputReady) {
+        if (AmethystSDL3InputActive()) {
+            AmethystSDL3ForwardInput(AM_SDL_INPUT_SCREEN, width, height, 0, 0, 0, 0);
+        }
         if (GLFW_invoke_FramebufferSize) {
             if (isUseStackQueueCall) {
                 sendData(EVENT_TYPE_FRAMEBUFFER_SIZE, width, height, 0, 0);
@@ -592,6 +697,10 @@ void CallbackBridge_nativeSendScreenSize(int width, int height) {
 }
 
 void CallbackBridge_nativeSendScroll(CGFloat xoffset, CGFloat yoffset) {
+    if (AmethystSDL3InputActive() && isInputReady) {
+        AmethystSDL3ForwardInput(AM_SDL_INPUT_SCROLL, 0, 0, 0, 0, (float)xoffset, (float)yoffset);
+        return;
+    }
     if (GLFW_invoke_Scroll && isInputReady) {
         if (isUseStackQueueCall) {
             sendDataFloat(EVENT_TYPE_SCROLL, xoffset, yoffset, 0, 0);
@@ -603,6 +712,14 @@ void CallbackBridge_nativeSendScroll(CGFloat xoffset, CGFloat yoffset) {
 
 JNIEXPORT void JNICALL Java_org_lwjgl_glfw_GLFW_nglfwSetShowingWindow(JNIEnv* env, jclass clazz, jlong window) {
     showingWindow = (long) window;
+    if (AmethystSDL3InputActive() && window != 0) {
+        // The SDL3 backend does not call the GLFW poll hook that normally
+        // flips this legacy input gate. SDL events are queued by SDL3Bridge,
+        // so accept touch/control input as soon as LWJGL publishes its window.
+        isInputReady = true;
+        fprintf(stderr, "[InputBridge] SDL window published window=%lx; input ready\n", showingWindow);
+        fflush(stderr);
+    }
 }
 
 void CallbackBridge_pauseGameIfNeed() {

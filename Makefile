@@ -110,6 +110,11 @@ AME_JRE17_DIR       ?= $(SOURCEDIR)/depends/java-17-openjdk
 AME_JRE21_DIR       ?= $(SOURCEDIR)/depends/java-21-openjdk
 AME_JRE25_DIR       ?= $(SOURCEDIR)/depends/java-25-openjdk
 
+# Bundle each LWJGL archive with the native directory named in this manifest.
+LWJGL_MANIFEST := $(SOURCEDIR)/Natives/resources/lwjgl_versions.txt
+LWJGL_PAIRS := $(shell awk '/^[ \t]*\#/ {next} NF {print $$1 ":" $$2}' $(LWJGL_MANIFEST))
+LWJGL_SUBS := $(sort $(filter-out root,$(foreach p,$(LWJGL_PAIRS),$(word 2,$(subst :, ,$(p))))))
+
 # Function to use later for checking dependencies
 METHOD_DEPCHECK   = $(shell $(1) >/dev/null 2>&1 && echo 1)
 
@@ -123,7 +128,7 @@ METHOD_INFOPLIST  =  \
 
 # Function to check directories
 METHOD_DIRCHECK   = \
-	if [ ! -d '$(1)' ]; then \
+	if [ ! -d $(1) ]; then \
 		mkdir -p $(1); \
 	else \
 		rm -rf $(1)/*; \
@@ -149,9 +154,11 @@ METHOD_PACKAGE = \
 		IPA_SUFFIX=".ipa"; \
 	fi; \
 	if [ '$(SLIMMED_ONLY)' = '0' ]; then \
+		rm -f $(OUTPUTDIR)/org.angelauramc.amethyst-$(VERSION)-$(PLATFORM_NAME)$$IPA_SUFFIX; \
 		zip --symlinks -r $(OUTPUTDIR)/org.angelauramc.amethyst-$(VERSION)-$(PLATFORM_NAME)$$IPA_SUFFIX Payload; \
 	fi; \
 	if [ '$(SLIMMED)' = '1' ] || [ '$(SLIMMED_ONLY)' = '1' ]; then \
+		rm -f $(OUTPUTDIR)/org.angelauramc.amethyst.slimmed-$(VERSION)-$(PLATFORM_NAME)$$IPA_SUFFIX; \
 		zip --symlinks -r $(OUTPUTDIR)/org.angelauramc.amethyst.slimmed-$(VERSION)-$(PLATFORM_NAME)$$IPA_SUFFIX Payload --exclude='Payload/AngelAuraAmethyst.app/java_runtimes/*'; \
 	fi
 
@@ -348,7 +355,25 @@ payload: native dep_mg java jre assets
 	cp -R $(SOURCEDIR)/Natives/resources/* $(WORKINGDIR)/AngelAuraAmethyst.app/ || exit 1
 	cp $(WORKINGDIR)/*.dylib $(WORKINGDIR)/AngelAuraAmethyst.app/Frameworks/ || exit 1
 	cp -R $(SOURCEDIR)/JavaApp/libs/others/* $(WORKINGDIR)/AngelAuraAmethyst.app/libs/ || exit 1
-	cp $(SOURCEDIR)/JavaApp/build/*.jar $(WORKINGDIR)/AngelAuraAmethyst.app/libs/ || exit 1
+	for sub in $(LWJGL_SUBS); do mkdir -p $(WORKINGDIR)/AngelAuraAmethyst.app/libs/$$sub $(WORKINGDIR)/AngelAuraAmethyst.app/Frameworks/$$sub || exit 1; done
+	for f in $(SOURCEDIR)/JavaApp/build/*.jar; do \
+		b=$$(basename "$$f"); dest=$(WORKINGDIR)/AngelAuraAmethyst.app/libs; matched=0; \
+		for p in $(LWJGL_PAIRS); do if [ "$$b" = "lwjgl-$${p%%:*}.jar" ]; then sub=$${p#*:}; [ "$$sub" = root ] || dest=$(WORKINGDIR)/AngelAuraAmethyst.app/libs/$$sub; matched=1; fi; done; \
+		case "$$b" in lwjgl-*.jar) [ "$$matched" = 1 ] || continue;; esac; \
+		cp "$$f" "$$dest/" || exit 1; \
+	done
+	for sub in $(LWJGL_SUBS); do \
+		cp -R $(SOURCEDIR)/Natives/resources/Frameworks/$$sub/. $(WORKINGDIR)/AngelAuraAmethyst.app/Frameworks/$$sub/ || exit 1; \
+		for f in $(WORKINGDIR)/AngelAuraAmethyst.app/Frameworks/$$sub/*.dylib; do \
+			[ -f "$$f" ] || continue; install_name_tool -id "@rpath/$$sub/$$(basename "$$f")" "$$f" || exit 1; \
+		done; \
+	done
+	# LWJGL 3.4's SPVC binding loads this library by its canonical basename.
+	# MobileGlues ships an iOS arm64 build of the SPIRV-Cross C API used by LWJGL.
+	cp $(SOURCEDIR)/Natives/external/MobileGlues/src/main/cpp/libraries/ios/libspirv-cross-c-shared.dylib $(WORKINGDIR)/AngelAuraAmethyst.app/Frameworks/lwjgl34/libspirv-cross.dylib || exit 1
+	install_name_tool -id @rpath/lwjgl34/libspirv-cross.dylib $(WORKINGDIR)/AngelAuraAmethyst.app/Frameworks/lwjgl34/libspirv-cross.dylib || exit 1
+	cp $(WORKINGDIR)/libamethyst_sdl3_jni.dylib $(WORKINGDIR)/AngelAuraAmethyst.app/Frameworks/lwjgl34/libamethyst_sdl3_jni.dylib || exit 1
+	install_name_tool -id @rpath/lwjgl34/libamethyst_sdl3_jni.dylib $(WORKINGDIR)/AngelAuraAmethyst.app/Frameworks/lwjgl34/libamethyst_sdl3_jni.dylib || exit 1
 	cp -R $(SOURCEDIR)/JavaApp/libs/caciocavallo/* $(WORKINGDIR)/AngelAuraAmethyst.app/libs_caciocavallo || exit 1
 	cp -R $(SOURCEDIR)/JavaApp/libs/caciocavallo17/* $(WORKINGDIR)/AngelAuraAmethyst.app/libs_caciocavallo17 || exit 1
 	$(call METHOD_DIRCHECK,$(OUTPUTDIR)/Payload)

@@ -10,10 +10,12 @@
 #include <unistd.h>
 
 #include "utils.h"
+#include "renderer_info.h"
 
 #import "ios_uikit_bridge.h"
 #import "JavaLauncher.h"
 #import "LauncherPreferences.h"
+#import "LWJGLVersions.h"
 #import "MinecraftOptionUtils.h"
 #import "PLLogOutputView.h"
 #import "PLProfiles.h"
@@ -151,6 +153,8 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
     BOOL launchJar = NO;
     NSString *gameDir;
     NSString *defaultJRETag;
+    AMLWJGLVersion *selectedLWJGL = nil;
+    BOOL isMinecraft26 = NO;
     NSCAssert(launchTarget, @"Unexpected nil launchTarget");
     if ([launchTarget isKindOfClass:NSDictionary.class]) {
         // Get preferred Java version from current profile
@@ -163,14 +167,50 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
                 minVersion = preferredJavaVersion;
             }
         }
-        if (minVersion <= 8) {
+        if (minVersion >= 25) {
+            defaultJRETag = @"1_26_newer";
+        } else if (minVersion <= 8) {
             defaultJRETag = @"1_16_5_older";
         } else {
             defaultJRETag = @"1_17_newer";
         }
 
+        NSString *requiredLWJGLVersion = [launchTarget[@"lwjglVersion"] isKindOfClass:NSString.class] ? launchTarget[@"lwjglVersion"] : nil;
+        if (requiredLWJGLVersion.length == 0 && [launchTarget[@"libraries"] isKindOfClass:NSArray.class]) {
+            // Mojang's 26.x version metadata declares LWJGL versions on its
+            // library coordinates instead of a top-level lwjglVersion key.
+            for (NSDictionary *library in launchTarget[@"libraries"]) {
+                NSString *name = [library[@"name"] isKindOfClass:NSString.class] ? library[@"name"] : nil;
+                NSArray<NSString *> *components = [name componentsSeparatedByString:@":"];
+                if (components.count >= 3 && [components[0] isEqualToString:@"org.lwjgl"] && [components[1] isEqualToString:@"lwjgl"]) {
+                    requiredLWJGLVersion = components[2];
+                    break;
+                }
+            }
+        }
+        AMLWJGLSelection *lwjglSelection = [AMLWJGLVersions selectForRequiredVersion:requiredLWJGLVersion versionId:launchTarget[@"id"]];
+        selectedLWJGL = lwjglSelection.version;
+        NSLog(@"[LWJGL] Game requests %@; selected %@ (iOS native ABI %@) for version %@", requiredLWJGLVersion ?: @"unspecified", selectedLWJGL.folder, selectedLWJGL.nativeVersion, launchTarget[@"id"]);
+        if (![selectedLWJGL.version isEqualToString:selectedLWJGL.nativeVersion]) {
+            NSLog(@"[LWJGL] WARNING: Java bindings %@ use the bundled iOS native ABI %@; validating compatibility at runtime", selectedLWJGL.version, selectedLWJGL.nativeVersion);
+        }
+        if (selectedLWJGL.hasSDL) {
+            // SDL 3 uses its own input bridge. The legacy GLFW JNI bootstrap
+            // assumes the old GLFW class layout and can crash while loading
+            // LWJGL 3.4 from the versioned bundle.
+            setenv("AME_SKIP_JNI_GLFW", "1", 1);
+        }
+
         // Setup RENDERER
         NSString *renderer = [PLProfiles resolveKeyForCurrentProfile:@"renderer"];
+        NSString *versionId = [launchTarget[@"id"] isKindOfClass:NSString.class] ? launchTarget[@"id"] : @"";
+        if ([versionId hasPrefix:@"26."]) {
+            isMinecraft26 = YES;
+            if ([renderer isEqualToString:@"auto"]) {
+                renderer = @ RENDERER_NAME_MOLTENVK;
+                NSLog(@"[Vulkan] Minecraft %@ requires Vulkan; selected MoltenVK", versionId);
+            }
+        }
         NSLog(@"[JavaLauncher] RENDERER is set to %@\n", renderer);
         setenv("RENDERER", renderer.UTF8String, 1);
         // Setup gameDir
@@ -232,13 +272,25 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
     const char *margv[1000];
 
     margv[++margc] = [NSString stringWithFormat:@"%@/bin/java", javaHome].UTF8String;
-    margv[++margc] = "-XstartOnFirstThread";
+    if (selectedLWJGL.hasSDL) {
+        // launchJVM is already running on a worker thread. For SDL3, leave the
+        // UIKit main thread available so nativeInit can synchronously marshal
+        // SDL video initialization onto the main dispatch queue.
+        NSLog(@"[JavaLauncher] SDL runtime: leaving UIKit main thread available");
+    } else {
+        margv[++margc] = "-XstartOnFirstThread";
+    }
     if (!launchJar) {
         margv[++margc] = "-Djava.system.class.loader=net.kdt.pojavlaunch.PojavClassLoader";
     }
     margv[++margc] = "-Xms128M";
     margv[++margc] = [NSString stringWithFormat:@"-Xmx%dM", allocmem].UTF8String;
-    margv[++margc] = [NSString stringWithFormat:@"-Djava.library.path=%@/Frameworks", NSBundle.mainBundle.bundlePath].UTF8String;
+    NSString *frameworksPath = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks"];
+    NSString *nativePath = (selectedLWJGL.nativeSubfolder.length && ![selectedLWJGL.nativeSubfolder isEqualToString:@"root"])
+        ? [NSString stringWithFormat:@"%@/%@:%@", frameworksPath, selectedLWJGL.nativeSubfolder, frameworksPath]
+        : frameworksPath;
+    if (selectedLWJGL.nativeSubfolder.length && ![selectedLWJGL.nativeSubfolder isEqualToString:@"root"]) setenv("AME_LWJGL_NATIVE_SUBFOLDER", selectedLWJGL.nativeSubfolder.UTF8String, 1);
+    margv[++margc] = [NSString stringWithFormat:@"-Djava.library.path=%@", nativePath].UTF8String;
     margv[++margc] = [NSString stringWithFormat:@"-Duser.dir=%@", gameDir].UTF8String;
     margv[++margc] = [NSString stringWithFormat:@"-Duser.home=%s", getenv("AME_HOME")].UTF8String;
     margv[++margc] = [NSString stringWithFormat:@"-Duser.timezone=%@", NSTimeZone.localTimeZone.name].UTF8String;
@@ -252,8 +304,13 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
     const char *glLibName = getenv("RENDERER");
     if (glLibName) {
         if (!strcmp(glLibName, "auto")) {
-            // workaround only applies to 1.20.2+
-            glLibName = RENDERER_NAME_MTL_ANGLE;
+            // Keep the Java-side LWJGL library selection consistent with the
+            // native OpenGL bridge.  The old auto path selected MetalANGLE
+            // here, while pojavInitOpenGL() selected GL4ES/MobileGlues from
+            // the same environment value.  That left 1.21.x (which requests
+            // a modern OpenGL context) with mismatched native and Java
+            // renderer backends.
+            glLibName = RENDERER_NAME_MOBILEGLUES;
         }
         margv[++margc] = [NSString stringWithFormat:@"-Dorg.lwjgl.opengl.libname=%s", glLibName].UTF8String;
     }
@@ -268,8 +325,12 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
     margv[++margc] = "-XX:+UnlockExperimentalVMOptions";
     margv[++margc] = "-XX:+DisablePrimordialThreadGuardPages";
 
-    // On iOS 26, use mirror mapped JIT by default
-    if (@available(iOS 26.0, *)) {
+    // Mirror-mapped code cache is only required on devices that cannot create
+    // regular RX mappings.  Enabling it for every iOS 26 device makes the JVM
+    // ask the JIT bridge for a mirror mapping even when TXM/regular JIT is
+    // available (notably in VPhone), which can trap in BreakGetJITMapping
+    // while Java is initializing its code cache.
+    if (DeviceHasJITFlags(JIT_FLAG_FORCE_MIRRORED)) {
         margv[++margc] = "-XX:+MirrorMappedCodeCache";
     }
 
@@ -355,10 +416,44 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
         }
     }
 
+    // Minecraft 26.x compiles many Vulkan pipelines through shaderc during
+    // resource reload. On iOS virtualized devices, running one compiler per
+    // reported host CPU can leave every resource worker inside native shaderc
+    // for minutes. Bound the pool size while allowing profile JVM flags to
+    // override the default below.
+    if (isMinecraft26) {
+        margv[++margc] = "-XX:ActiveProcessorCount=4";
+        margv[++margc] = "-Damethyst.shaderc.disableDebugInfo=true";
+        NSLog(@"[Vulkan] Capping JVM processor count at 4 for shader compilation");
+    }
+
+    NSString *liveContainerInfo = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"LCAppInfo.plist"];
+    BOOL isLiveContainer = getenv("LC_HOME_PATH") != NULL || [fm fileExistsAtPath:liveContainerInfo];
+    if (isMinecraft26 && isLiveContainer && DeviceHasJITFlags(JIT_FLAG_FORCE_MIRRORED)) {
+        // JNA's extracted native library is rejected by library validation.
+        margv[++margc] = "-Djna.nounpack=true";
+        const char *amethystHome = getenv("AME_HOME");
+        if (amethystHome && *amethystHome) {
+            margv[++margc] = [NSString stringWithFormat:@"-XX:ErrorFile=%s/hs_err_pid%%p.log", amethystHome].UTF8String;
+        }
+        NSLog(@"[JavaLauncher] LiveContainer mirrored cache: disabling JNA extraction");
+    }
+
     init_loadCustomJvmFlags(&margc, (const char **)margv);
     NSLog(@"[Init] Found JLI lib");
 
     NSString *classpath = [NSString stringWithFormat:@"%@/*", librariesPath];
+    if (selectedLWJGL.folder.length) {
+        NSString *archive = [selectedLWJGL.nativeSubfolder isEqualToString:@"root"]
+            ? [NSString stringWithFormat:@"%@/lwjgl-%@.jar", librariesPath, selectedLWJGL.version]
+            : [NSString stringWithFormat:@"%@/%@/lwjgl-%@.jar", librariesPath, selectedLWJGL.nativeSubfolder, selectedLWJGL.version];
+        margv[++margc] = [NSString stringWithFormat:@"-Damethyst.lwjgl.jar=%@", archive].UTF8String;
+        if (selectedLWJGL.hasSDL) margv[++margc] = "-Damethyst.hangwatchdog=true";
+    }
+    if (selectedLWJGL.folder.length) {
+        NSString *versionedLWJGL = [NSString stringWithFormat:@"%@/%@/lwjgl-%@.jar", librariesPath, selectedLWJGL.nativeSubfolder, selectedLWJGL.version];
+        classpath = [classpath stringByAppendingFormat:@":%@", versionedLWJGL];
+    }
     if (launchJar) {
         classpath = [classpath stringByAppendingFormat:@":%@", launchTarget];
     }

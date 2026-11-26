@@ -25,6 +25,7 @@
 #include "utils.h"
 
 #include <dlfcn.h>
+#include <stdio.h>
 
 int memorystatus_control(uint32_t command, int32_t pid, uint32_t flags, void *buffer, size_t buffersize);
 #define MEMORYSTATUS_CMD_SET_JETSAM_TASK_LIMIT        6
@@ -387,6 +388,15 @@ static GameSurfaceView* pojavWindow;
     if ((windowHeight % 2) != 0) {
         --windowHeight;
     }
+
+    // EGL renders into the CAMetalLayer used by the game surface.  On VPhone
+    // the drawable size is not always inferred from contentsScale, leaving a
+    // valid EGL context with a zero-sized presentation target (black screen
+    // while the touch controls remain visible).
+    if ([self.surfaceView.layer isKindOfClass:CAMetalLayer.class]) {
+        ((CAMetalLayer *)self.surfaceView.layer).drawableSize =
+            CGSizeMake(windowWidth, windowHeight);
+    }
     CallbackBridge_nativeSendScreenSize(windowWidth, windowHeight);
 }
 
@@ -607,13 +617,18 @@ static GameSurfaceView* pojavWindow;
 
         if (touchEvent == self.primaryTouch) {
             if ([self isTouchInactive:self.primaryTouch]) return; // FIXME: should be? ACTION_UP will never be sent
+            // SDL mouse coordinates are relative to the game drawable. The
+            // controller root can include a safe-area/top inset, so convert
+            // the touch directly into surfaceView coordinates before sending
+            // it to the renderer/input bridge.
+            CGPoint gameLocation = [touchEvent locationInView:self.surfaceView];
             if (event == ACTION_MOVE && isGrabbing) {
                 event = ACTION_MOVE_MOTION;
-                CGPoint prevLocationInView = [touchEvent previousLocationInView:self.rootView];
-                locationInView.x -= prevLocationInView.x;
-                locationInView.y -= prevLocationInView.y;
+                CGPoint prevLocationInView = [touchEvent previousLocationInView:self.surfaceView];
+                gameLocation.x -= prevLocationInView.x;
+                gameLocation.y -= prevLocationInView.y;
             }
-            [self sendTouchPoint:locationInView withEvent:event];
+            [self sendTouchPoint:gameLocation withEvent:event];
         }
     //}
 }
@@ -703,6 +718,9 @@ static GameSurfaceView* pojavWindow;
     if (sender.state == UIGestureRecognizerStateRecognized) {
         if (currentHotbarSlot == -1) {
             if (!self.enableMouseGestures) return;
+            fprintf(stderr, "[TouchTrace] tap recognized; dispatching %s click\n",
+                    isGrabbing == JNI_TRUE ? "right" : "left");
+            fflush(stderr);
             CallbackBridge_nativeSendMouseButton(isGrabbing == JNI_TRUE ?
                 GLFW_MOUSE_BUTTON_RIGHT : GLFW_MOUSE_BUTTON_LEFT, 1, 0);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 33 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
@@ -826,7 +844,11 @@ static GameSurfaceView* pojavWindow;
 #pragma mark - On-screen button functions
 
 - (void)executebtn:(ControlButton *)sender withAction:(int)action {
+    // ACTION_DOWN/UP are Amethyst's touch phases (0/1), while GLFW uses
+    // PRESS/RELEASE (1/0). Keep the phase value for one-shot controls below,
+    // and translate explicitly at the GLFW boundary.
     int held = action == ACTION_DOWN;
+    int glfwAction = held ? 1 : 0;
     for (int i = 0; i < 4; i++) {
         int keycode = ((NSNumber *)sender.properties[@"keycodes"][i]).intValue;
         if (keycode < 0) {
@@ -845,15 +867,18 @@ static GameSurfaceView* pojavWindow;
                     break;
 
                 case SPECIALBTN_MOUSEPRI:
-                    CallbackBridge_nativeSendMouseButton(GLFW_MOUSE_BUTTON_LEFT, held, 0);
+                    fprintf(stderr, "[TouchTrace] onscreen left click %s -> GLFW %s\n",
+                            held ? "down" : "up", glfwAction ? "press" : "release");
+                    fflush(stderr);
+                    CallbackBridge_nativeSendMouseButton(GLFW_MOUSE_BUTTON_LEFT, glfwAction, 0);
                     break;
 
                 case SPECIALBTN_MOUSESEC:
-                    CallbackBridge_nativeSendMouseButton(GLFW_MOUSE_BUTTON_RIGHT, held, 0);
+                    CallbackBridge_nativeSendMouseButton(GLFW_MOUSE_BUTTON_RIGHT, glfwAction, 0);
                     break;
 
                 case SPECIALBTN_MOUSEMID:
-                    CallbackBridge_nativeSendMouseButton(GLFW_MOUSE_BUTTON_MIDDLE, held, 0);
+                    CallbackBridge_nativeSendMouseButton(GLFW_MOUSE_BUTTON_MIDDLE, glfwAction, 0);
                     break;
 
                 case SPECIALBTN_TOGGLECTRL:
@@ -895,7 +920,7 @@ static GameSurfaceView* pojavWindow;
             // there's no key id 0, but we accidentally used -1 as a special key id, so we had to do that
             // if (keycode == 0) { keycode = -1; }
             // at the moment, send unknown keycode does nothing, may even cause performance issue, so ignore it
-            CallbackBridge_nativeSendKey(keycode, 0, held, 0);
+            CallbackBridge_nativeSendKey(keycode, 0, glfwAction, 0);
         }
     }
 }

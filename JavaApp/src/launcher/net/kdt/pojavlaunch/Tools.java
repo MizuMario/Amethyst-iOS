@@ -70,6 +70,21 @@ public final class Tools {
                 loader.addURL(new File(s).toURI().toURL());
             }
         }
+
+        try {
+            Class<?> apiUtil = loader.loadClass("org.lwjgl.system.APIUtil");
+            boolean hasCif = false;
+            for (java.lang.reflect.Method candidate : apiUtil.getDeclaredMethods()) {
+                if (candidate.getName().equals("apiCreateCIF")) {
+                    hasCif = true;
+                    break;
+                }
+            }
+            System.err.println("[LWJGL] APIUtil origin=" + apiUtil.getProtectionDomain().getCodeSource().getLocation()
+                + " apiCreateCIF=" + hasCif);
+        } catch (Throwable error) {
+            System.err.println("[LWJGL] APIUtil inspection failed: " + error);
+        }
             
         Class<?> clazz = loader.loadClass(versionInfo.mainClass);
         Method method = clazz.getMethod("main", String[].class);
@@ -137,8 +152,46 @@ public final class Tools {
                 profile
             ), varArgMap
         );
+        // Minecraft 26.x introduces the Vulkan renderer and otherwise may
+        // select OpenGL after an unclean previous shutdown. On iOS the
+        // bundled MoltenVK path is the supported backend for these versions.
+        if (isMinecraft26OrNewer(versionInfo.id)) {
+            List<String> args = new ArrayList<String>(Arrays.asList(argsFromJson));
+            boolean backendSpecified = false;
+            for (int i = 0; i < args.size(); i++) {
+                if ("--graphicsBackend".equals(args.get(i))) {
+                    if (i + 1 < args.size()) {
+                        args.set(i + 1, "vulkan");
+                    } else {
+                        args.add("vulkan");
+                    }
+                    backendSpecified = true;
+                    break;
+                }
+            }
+            if (!backendSpecified) {
+                args.add("--graphicsBackend");
+                args.add("vulkan");
+            }
+            System.out.println("[Graphics] Minecraft " + versionInfo.id + " forced graphics backend=vulkan");
+            return args.toArray(new String[0]);
+        }
         // Tools.dialogOnUiThread(this, "Result args", Arrays.asList(argsFromJson).toString());
         return argsFromJson;
+    }
+
+    private static boolean isMinecraft26OrNewer(String versionId) {
+        if (versionId == null || !versionId.matches("^\\d+\\.\\d+(?:\\.\\d+)?(?:[-+].*)?$")) {
+            return false;
+        }
+        String[] parts = versionId.split("[.+-]", 3);
+        try {
+            int major = Integer.parseInt(parts[0]);
+            int minor = Integer.parseInt(parts[1]);
+            return major > 1 || (major == 1 && minor >= 26);
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
     }
 
     public static String fromStringArray(String[] strArr) {

@@ -12,7 +12,14 @@ import java.net.*;
  */
 public class PojavClassLoader extends URLClassLoader {
     public PojavClassLoader(ClassLoader parent) {
-        super(new URL[0], parent);
+        super(initialUrls(), parent);
+    }
+
+    private static URL[] initialUrls() {
+        String bundledLwjgl = System.getProperty("amethyst.lwjgl.jar");
+        return bundledLwjgl == null || bundledLwjgl.isEmpty()
+            ? new URL[0]
+            : new URL[] { getFileURL(new File(bundledLwjgl)) };
     }
 
     @Override
@@ -23,6 +30,27 @@ public class PojavClassLoader extends URLClassLoader {
         } catch (URISyntaxException e) {
             e.printStackTrace();
         }
+    }
+
+    @Override
+    protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+        if (name.startsWith("org.lwjgl.")) {
+            synchronized (getClassLoadingLock(name)) {
+                Class<?> loaded = findLoadedClass(name);
+                if (loaded == null) {
+                    try {
+                        loaded = findClass(name);
+                    } catch (ClassNotFoundException ignored) {
+                        // Fall back to the game's LWJGL when this release does
+                        // not bundle a class from an optional LWJGL module.
+                    }
+                }
+                if (loaded == null) loaded = super.loadClass(name, false);
+                if (resolve) resolveClass(loaded);
+                return loaded;
+            }
+        }
+        return super.loadClass(name, resolve);
     }
 
     static URL getFileURL(File file) {
