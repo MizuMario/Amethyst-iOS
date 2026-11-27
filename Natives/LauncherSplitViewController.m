@@ -47,6 +47,13 @@ extern NSMutableDictionary *prefDict;
 }
 
 - (void)changeDisplayModeForSize:(CGSize)size {
+#if AMETHYST_SWIFT_PROFILE_UI
+    if (@available(iOS 17.0, *)) {
+        self.preferredDisplayMode = UISplitViewControllerDisplayModeSecondaryOnly;
+        self.presentsWithGesture = NO;
+        return;
+    }
+#endif
     BOOL isPortrait = size.height > size.width;
     if (self.preferredDisplayMode == 0 || self.displayMode != UISplitViewControllerDisplayModeSecondaryOnly) {
         if(!getPrefBool(@"general.hidden_sidebar")) {

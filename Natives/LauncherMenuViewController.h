@@ -18,6 +18,9 @@
 
 - (void)restoreHighlightedSelection;
 - (void)selectAccount:(UIButton *)sender;
+- (void)selectAccountFrom:(UIViewController *)presenter anchor:(UIView *)anchor completion:(void (^)(void))completion;
+- (void)selectAccountFrom:(UIViewController *)presenter anchor:(UIView *)anchor sourceRect:(CGRect)rect
+              completion:(void (^)(void))completion;
 - (void)updateAccountInfo;
 - (UIBarButtonItem *)drawAccountButton;
 

@@ -416,6 +416,7 @@
     if (invokeAction) {
         invokeAction();
     }
+    if ([item[@"opensScreen"] boolValue]) return;
 
     UIView *view = [self.tableView cellForRowAtIndexPath:indexPath];
     NSString *title = localize(([NSString stringWithFormat:@"preference.title.done.%@", key]), nil);

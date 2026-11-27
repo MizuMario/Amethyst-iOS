@@ -19,6 +19,8 @@
 @property(nonatomic) int versionSelectedAt;
 @end
 
+NSString * const LauncherProfilesDidSaveNotification = @"LauncherProfilesDidSave";
+
 @implementation LauncherProfileEditorViewController
 
 - (void)viewDidLoad {
@@ -103,12 +105,6 @@
               @"placeholder": self.getPreference(nil, @"lastVersionId"),
               @"customClass": PickTextField.class
             },
-            @{@"key": @"gameDir",
-              @"icon": @"folder",
-              @"title": @"preference.title.game_directory",
-              @"type": self.typeTextField,
-              @"placeholder": [NSString stringWithFormat:@". -> /Documents/instances/%@", getPrefObject(@"general.game_directory")]
-            },
             // Video and renderer settings
             @{@"key": @"renderer",
               @"icon": @"cpu",
@@ -171,9 +167,17 @@
         // Not a rename, directly create/replace
         PLProfiles.current.profiles[self.oldName] = self.profile;
     } else if (!PLProfiles.current.profiles[self.profile[@"name"]]) {
+        NSError *directoryError;
+        if (![PLProfiles.current renameGameDirectoryForProfile:self.oldName to:self.profile[@"name"] error:&directoryError]) {
+            showDialog(localize(@"Error", nil), directoryError.localizedDescription);
+            return;
+        }
         // A rename, remove then re-add to update its key name
         if (self.oldName.length > 0) {
             [PLProfiles.current.profiles removeObjectForKey:self.oldName];
+        }
+        if (!self.oldName.length && ![self.profile[@"gameDir"] length]) {
+            self.profile[@"instanceLayout"] = @"new";
         }
         PLProfiles.current.profiles[self.profile[@"name"]] = self.profile;
         // Update selected name
@@ -188,11 +192,9 @@
     }
 
     [PLProfiles.current save];
-    [self actionClose];
-
-    // Call LauncherProfilesViewController's viewWillAppear
-    UINavigationController *navVC = (id) ((UISplitViewController *)self.presentingViewController).viewControllers[1];
-    [navVC.viewControllers[0] viewWillAppear:NO];
+    [self.navigationController dismissViewControllerAnimated:YES completion:^{
+        [NSNotificationCenter.defaultCenter postNotificationName:LauncherProfilesDidSaveNotification object:nil];
+    }];
 }
 
 - (BOOL)isPickFieldAtSection:(NSString *)section key:(NSString *)key {

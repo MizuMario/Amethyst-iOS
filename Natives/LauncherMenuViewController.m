@@ -4,7 +4,6 @@
 #import "ALTServerConnection.h"
 #import "LauncherNavigationController.h"
 #import "LauncherMenuViewController.h"
-#import "LauncherNewsViewController.h"
 #import "LauncherPreferences.h"
 #import "LauncherPreferencesViewController.h"
 #import "LauncherProfilesViewController.h"
@@ -60,24 +59,10 @@
     [titleView sizeToFit];
     
     self.options = @[
-        [LauncherMenuCustomItem vcClass:LauncherNewsViewController.class],
         [LauncherMenuCustomItem vcClass:LauncherProfilesViewController.class],
         [LauncherMenuCustomItem vcClass:LauncherPreferencesViewController.class],
     ].mutableCopy;
-    if (realUIIdiom != UIUserInterfaceIdiomTV) {
-        [self.options addObject:(id)[LauncherMenuCustomItem
-                                     title:localize(@"launcher.menu.custom_controls", nil)
-                                     imageName:@"MenuCustomControls" action:^{
-            [contentNavigationController performSelector:@selector(enterCustomControls)];
-        }]];
-    }
-    [self.options addObject:
-     (id)[LauncherMenuCustomItem
-          title:localize(@"launcher.menu.execute_jar", nil)
-          imageName:@"MenuInstallJar" action:^{
-        [contentNavigationController performSelector:@selector(enterModInstaller)];
-    }]];
-    
+
     // TODO: Finish log-uploading service integration
     [self.options addObject:
      (id)[LauncherMenuCustomItem
@@ -130,10 +115,10 @@
     
     [self updateAccountInfo];
     
-    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:1 inSection:0];
+    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:0 inSection:0];
     [self.tableView selectRowAtIndexPath:indexPath animated:YES scrollPosition:UITableViewScrollPositionNone];
     [self tableView:self.tableView didSelectRowAtIndexPath:indexPath];
-    self.lastSelectedIndex = 1;
+    self.lastSelectedIndex = 0;
     
     if (getEntitlementValue(@"get-task-allow")) {
         [self displayProgress:localize(@"login.jit.checking", nil)];
@@ -237,6 +222,11 @@
             [contentNavigationController setViewControllers:selected.vcArray animated:NO];
             self.lastSelectedIndex = indexPath.row;
         }
+#if AMETHYST_SWIFT_PROFILE_UI
+        if (@available(iOS 17.0, *)) {
+            if ([selected.vcArray[0] isKindOfClass:LauncherProfilesViewController.class]) return;
+        }
+#endif
         selected.vcArray[0].navigationItem.rightBarButtonItem = self.accountBtnItem;
         selected.vcArray[0].navigationItem.leftBarButtonItem = self.splitViewController.displayModeButtonItem;
         selected.vcArray[0].navigationItem.leftItemsSupplementBackButton = true;
@@ -244,6 +234,19 @@
 }
 
 - (void)selectAccount:(UIButton *)sender {
+    [self selectAccountFrom:self anchor:sender completion:^{
+        if (sender != self.accountButton) {
+            [sender sendActionsForControlEvents:UIControlEventPrimaryActionTriggered];
+        }
+    }];
+}
+
+- (void)selectAccountFrom:(UIViewController *)presenter anchor:(UIView *)anchor completion:(void (^)(void))completion {
+    [self selectAccountFrom:presenter anchor:anchor sourceRect:anchor.bounds completion:completion];
+}
+
+- (void)selectAccountFrom:(UIViewController *)presenter anchor:(UIView *)anchor sourceRect:(CGRect)rect
+              completion:(void (^)(void))completion {
     AccountListViewController *vc = [[AccountListViewController alloc] init];
     vc.whenDelete = ^void(NSString* name) {
         if ([name isEqualToString:getPrefObject(@"internal.selected_account")]) {
@@ -255,20 +258,17 @@
     vc.whenItemSelected = ^void() {
         setPrefObject(@"internal.selected_account", BaseAuthenticator.current.authData[@"username"]);
         [self updateAccountInfo];
-        if (sender != self.accountButton) {
-            // Called from the play button, so call back to continue
-            [sender sendActionsForControlEvents:UIControlEventPrimaryActionTriggered];
-        }
+        if (completion) completion();
     };
     vc.modalPresentationStyle = UIModalPresentationPopover;
     vc.preferredContentSize = CGSizeMake(350, 250);
 
     UIPopoverPresentationController *popoverController = vc.popoverPresentationController;
-    popoverController.sourceView = sender;
-    popoverController.sourceRect = sender.bounds;
+    popoverController.sourceView = anchor;
+    popoverController.sourceRect = rect;
     popoverController.permittedArrowDirections = UIPopoverArrowDirectionAny;
     popoverController.delegate = vc;
-    [self presentViewController:vc animated:YES completion:nil];
+    [presenter presentViewController:vc animated:YES completion:nil];
 }
 
 - (void)updateAccountInfo {
@@ -279,7 +279,7 @@
         if((size.width / 3) > 200) {
             [self.accountButton setAttributedTitle:[[NSAttributedString alloc] initWithString:localize(@"login.option.select", nil)] forState:UIControlStateNormal];
         } else {
-            [self.accountButton setAttributedTitle:(NSAttributedString *)@"" forState:UIControlStateNormal];
+            [self.accountButton setAttributedTitle:nil forState:UIControlStateNormal];
         }
         [self.accountButton setImage:[UIImage imageNamed:@"DefaultAccount"] forState:UIControlStateNormal];
         [self.accountButton sizeToFit];
@@ -316,7 +316,7 @@
     if((size.width / 3) > 200) {
         [self.accountButton setAttributedTitle:title forState:UIControlStateNormal];
     } else {
-        [self.accountButton setAttributedTitle:(NSAttributedString *)@"" forState:UIControlStateNormal];
+        [self.accountButton setAttributedTitle:nil forState:UIControlStateNormal];
     }
     
     // TODO: Add caching mechanism for profile pictures

@@ -2,5 +2,6 @@
 #import "PLPrefTableViewController.h"
 
 @interface LauncherPreferencesViewController : PLPrefTableViewController
+@property(nonatomic, copy) NSString *launcherSection;
 
 @end

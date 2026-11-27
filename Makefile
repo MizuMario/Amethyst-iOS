@@ -358,7 +358,7 @@ payload: native dep_mg java jre assets
 	for sub in $(LWJGL_SUBS); do mkdir -p $(WORKINGDIR)/AngelAuraAmethyst.app/libs/$$sub $(WORKINGDIR)/AngelAuraAmethyst.app/Frameworks/$$sub || exit 1; done
 	for f in $(SOURCEDIR)/JavaApp/build/*.jar; do \
 		b=$$(basename "$$f"); dest=$(WORKINGDIR)/AngelAuraAmethyst.app/libs; matched=0; \
-		for p in $(LWJGL_PAIRS); do if [ "$$b" = "lwjgl-$${p%%:*}.jar" ]; then sub=$${p#*:}; [ "$$sub" = root ] || dest=$(WORKINGDIR)/AngelAuraAmethyst.app/libs/$$sub; matched=1; fi; done; \
+		for p in $(LWJGL_PAIRS); do if [ "$$b" = "lwjgl-$${p%%:*}.jar" ] || [ "$$b" = "lwjgl-$${p%%:*}-ffm.jar" ]; then sub=$${p#*:}; [ "$$sub" = root ] || dest=$(WORKINGDIR)/AngelAuraAmethyst.app/libs/$$sub; matched=1; fi; done; \
 		case "$$b" in lwjgl-*.jar) [ "$$matched" = 1 ] || continue;; esac; \
 		cp "$$f" "$$dest/" || exit 1; \
 	done

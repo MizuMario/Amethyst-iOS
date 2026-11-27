@@ -29,6 +29,9 @@ static void *ProgressObserverContext = &ProgressObserverContext;
 }
 
 @property(nonatomic) MinecraftResourceDownloadTask* task;
+@property(nonatomic, copy) NSString *downloadName;
+@property(nonatomic, copy) NSString *downloadStatus;
+@property(nonatomic) double lastDownloadFraction;
 @property(nonatomic) UINavigationController* progressVC;
 @property(nonatomic) NSArray* globalToolbarItems;
 @property(nonatomic) PLPickerView* versionPickerView;
@@ -278,23 +281,51 @@ static void *ProgressObserverContext = &ProgressObserverContext;
     UIApplication.sharedApplication.idleTimerDisabled = !enabled;
 }
 
+- (NSDictionary *)launcherDownloadSnapshot {
+    NSProgress *progress = self.task.progress;
+    double fraction = progress ? progress.fractionCompleted : self.lastDownloadFraction;
+    if (!isfinite(fraction)) fraction = 0;
+    return @{
+        @"name": self.downloadName ?: @"",
+        @"status": self.downloadStatus ?: @"idle",
+        @"fraction": @(MIN(1, MAX(0, fraction))),
+        @"detail": progress ? self.task.textProgress.localizedAdditionalDescription ?: @"" : @""
+    };
+}
+
+- (void)selectProfile:(NSString *)key launch:(BOOL)launch {
+    if (self.task || !PLProfiles.current.profiles[key]) return;
+    PLProfiles.current.selectedProfileName = key;
+    if (launch) [self launchProfile:key anchor:nil];
+    else [self reloadProfileList];
+}
+
 - (void)launchMinecraft:(UIButton *)sender {
-    if (!self.versionTextField.hasText) {
-        [self.versionTextField becomeFirstResponder];
+    NSString *key = PLProfiles.current.selectedProfileName;
+    if (key.length) [self launchProfile:key anchor:sender];
+    else if (self.versionTextField.window) [self.versionTextField becomeFirstResponder];
+}
+
+- (void)launchProfile:(NSString *)key anchor:(UIView *)sender {
+    if (self.task) return;
+    NSString *versionId = PLProfiles.current.profiles[key][@"lastVersionId"];
+    if (![versionId isKindOfClass:NSString.class] || !versionId.length) {
+        showDialog(localize(@"Error", nil), @"このインスタンスのMinecraftバージョンが設定されていません。");
         return;
     }
+    NSLog(@"[Launcher] Launch requested profile=%@ version=%@", key, versionId);
 
     if (BaseAuthenticator.current == nil) {
-        // Present the account selector if none selected
-        UIViewController *view = [(UINavigationController *)self.splitViewController.viewControllers[0]
-        viewControllers][0];
-        [view performSelector:@selector(selectAccount:) withObject:sender];
+        UIView *anchor = sender.window ? sender : self.view;
+        __weak typeof(self) weakSelf = self;
+        [sidebarViewController selectAccountFrom:self anchor:anchor completion:^{
+            [weakSelf launchProfile:key anchor:nil];
+        }];
         return;
     }
 
     [self setInteractionEnabled:NO forDownloading:YES];
 
-    NSString *versionId = PLProfiles.current.profiles[self.versionTextField.text][@"lastVersionId"];
     NSDictionary *object = [remoteVersionList filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"(id == %@)", versionId]].firstObject;
     if (!object) {
         object = @{
@@ -303,12 +334,17 @@ static void *ProgressObserverContext = &ProgressObserverContext;
         };
     }
 
+    self.downloadName = key;
+    self.downloadStatus = @"downloading";
+    self.lastDownloadFraction = 0;
     self.task = [MinecraftResourceDownloadTask new];
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         __weak LauncherNavigationController *weakSelf = self;
         self.task.handleError = ^{
             dispatch_async(dispatch_get_main_queue(), ^{
                 [weakSelf setInteractionEnabled:YES forDownloading:YES];
+                weakSelf.lastDownloadFraction = weakSelf.task.progress.fractionCompleted;
+                weakSelf.downloadStatus = @"failed";
                 weakSelf.task = nil;
                 weakSelf.progressVC = nil;
             });
@@ -384,12 +420,15 @@ static void *ProgressObserverContext = &ProgressObserverContext;
         self.progressViewMain.observedProgress = nil;
         if (self.task.metadata) {
             __block NSDictionary *metadata = self.task.metadata;
+            NSLog(@"[Launcher] Resources ready; opening Minecraft surface");
             [self invokeAfterJITEnabled:^{
                 UIKit_launchMinecraftSurfaceVC(self.view.window, metadata);
             }];
         } else {
             [self reloadProfileList];
         }
+        self.lastDownloadFraction = 1;
+        self.downloadStatus = @"complete";
         self.task = nil;
         [self setInteractionEnabled:YES forDownloading:YES];
     });
@@ -399,6 +438,10 @@ static void *ProgressObserverContext = &ProgressObserverContext;
     if (![notification.name isEqualToString:@"InstallModpack"]) {
         return;
     }
+    if (self.task) return;
+    self.downloadName = @"Modpack";
+    self.downloadStatus = @"downloading";
+    self.lastDownloadFraction = 0;
     [self setInteractionEnabled:NO forDownloading:YES];
     self.task = [MinecraftResourceDownloadTask new];
     NSDictionary *userInfo = notification.userInfo;
@@ -407,6 +450,8 @@ static void *ProgressObserverContext = &ProgressObserverContext;
         self.task.handleError = ^{
             dispatch_async(dispatch_get_main_queue(), ^{
                 [weakSelf setInteractionEnabled:YES forDownloading:YES];
+                weakSelf.lastDownloadFraction = weakSelf.task.progress.fractionCompleted;
+                weakSelf.downloadStatus = @"failed";
                 weakSelf.task = nil;
                 weakSelf.progressVC = nil;
             });
@@ -422,8 +467,17 @@ static void *ProgressObserverContext = &ProgressObserverContext;
     });
 }
 
+- (void)requestLauncherJIT {
+    if (self.task || self.presentedViewController || isJITEnabled(false)) return;
+    [self waitForSupportedJIT:^{}];
+}
+
 - (void)invokeAfterJITEnabled:(void(^)(void))handler {
     localVersionList = remoteVersionList = nil;
+    [self waitForSupportedJIT:handler];
+}
+
+- (void)waitForSupportedJIT:(void(^)(void))handler {
     BOOL hasTrollStoreJIT = getEntitlementValue(@"jb.pmap_cs.custom_trust");
     BOOL isLiveContainer = getenv("LC_HOME_PATH") != NULL;
 
@@ -456,22 +510,24 @@ static void *ProgressObserverContext = &ProgressObserverContext;
     UIAlertController* alert = [UIAlertController alertControllerWithTitle:localize(@"launcher.wait_jit.title", nil)
         message:hasTrollStoreJIT ? localize(@"launcher.wait_jit_trollstore.message", nil) : localize(@"launcher.wait_jit.message", nil)
         preferredStyle:UIAlertControllerStyleAlert];
-/* TODO:
-    UIAlertAction *cancel = [UIAlertAction actionWithTitle:localize(@"Cancel", nil) style:UIAlertActionStyleCancel handler:^{
-        
-    }];
-    [alert addAction:cancel];
-*/
+    [alert addAction:[UIAlertAction actionWithTitle:localize(@"Cancel", nil)
+        style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
+    [self pollJITForAlert:alert completion:handler attempts:300];
+}
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        while (!isJITEnabled(false)) {
-            // Perform check for every 200ms
-            usleep(1000*200);
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{
+- (void)pollJITForAlert:(UIAlertController *)alert completion:(void (^)(void))handler attempts:(NSUInteger)attempts {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        if (!alert.presentingViewController || alert.isBeingDismissed) return;
+        if (isJITEnabled(false)) {
             [alert dismissViewControllerAnimated:YES completion:handler];
-        });
+        } else if (attempts > 1) {
+            [self pollJITForAlert:alert completion:handler attempts:attempts - 1];
+        } else {
+            [alert dismissViewControllerAnimated:YES completion:^{
+                showDialog(localize(@"Error", nil), localize(@"launcher.wait_jit.message", nil));
+            }];
+        }
     });
 }
 

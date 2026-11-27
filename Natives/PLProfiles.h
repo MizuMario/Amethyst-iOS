@@ -18,5 +18,8 @@
 - (NSString *)selectedProfileName;
 - (void)setSelectedProfileName:(NSString *)name;
 - (void)save;
+- (NSString *)instancePathForName:(NSString *)name;
+- (NSString *)gameDirectoryForProfile:(NSString *)key create:(BOOL)create error:(NSError **)error;
+- (BOOL)renameGameDirectoryForProfile:(NSString *)oldKey to:(NSString *)newKey error:(NSError **)error;
 
 @end

@@ -33,7 +33,8 @@ JCFLAGS := -cp "$(subst $() $(),:,$(wildcard $(SOURCEDIR)/*/):$(JAVA_LIB_JARS))"
 SDL_VERSION := $(lastword $(LWJGL_SDL_VERSIONS))
 SDL_JCFLAGS := -cp "$(subst $() $(),:,$(wildcard $(SOURCEDIR)/*/):$(wildcard libs/lwjgl-$(SDL_VERSION)/*.jar))" -XDignore.symbol.file -implicit:none
 
-all: $(TARGETS) $(LWJGL_JARS)
+SDL_FFM_JARS := $(LWJGL_SDL_VERSIONS:%=$(OUTPUTDIR)/lwjgl-%-ffm.jar)
+all: $(TARGETS) $(LWJGL_JARS) $(SDL_FFM_JARS)
 
 # Sometimes the CI produces empty class file resulting in broken jar, so we check and abort here
 check_empty_classes:
@@ -86,13 +87,24 @@ $$(OUTPUTDIR)/lwjgl-$(1).jar: $$(CLASSES) check_empty_classes
 endef
 $(foreach version,$(LWJGL_VERSIONS),$(eval $(call LWJGL_JAR_RULE,$(version))))
 
-$(OUTPUTDIR)/patchjna_agent.jar: $(CLASSES) $(wildcard libs/patchjna_agent/*.jar)
-	@set -e
-	@mv $(basename $@)/com/sun/jna/Platform.class $(basename $@)/com/sun/jna/Platform.class.patch
-	@for asm in libs/patchjna_agent/*.jar; do (cd $(basename $@) && $(BOOTJDK)/jar -xf ../../$$asm); done
-	@rm -rf $(basename $@)/META-INF
+# Regular JIT runtimes can use Java 25 FFM without changing the mirrored-JIT jar.
+$(OUTPUTDIR)/lwjgl-%-ffm.jar: $(OUTPUTDIR)/lwjgl-%.jar scripts/merge_lwjgl_multi_release.py
+	@mkdir -p $(OUTPUTDIR)/lwjgl_ffm_$*
+	@rm -rf $(OUTPUTDIR)/lwjgl_ffm_$*/META-INF
+	@cp $< $@
+	@python3 scripts/merge_lwjgl_multi_release.py libs/lwjgl-$* $(OUTPUTDIR)/lwjgl_ffm_$*
+	@$(BOOTJDK)/jar -uf $@ -C $(OUTPUTDIR)/lwjgl_ffm_$* META-INF/versions
+
+$(OUTPUTDIR)/patchjna_agent.jar: $(CLASSES) $(wildcard libs/patchjna_agent/*.jar) scripts/relocate_agent_asm.py
+	@rm -rf $(OUTPUTDIR)/patchjna_packaging
+	@mkdir -p $(OUTPUTDIR)/patchjna_packaging
+	@cp -R $(basename $@)/. $(OUTPUTDIR)/patchjna_packaging/
+	@mv $(OUTPUTDIR)/patchjna_packaging/com/sun/jna/Platform.class $(OUTPUTDIR)/patchjna_packaging/com/sun/jna/Platform.class.patch
+	@for asm in libs/patchjna_agent/*.jar; do (cd $(OUTPUTDIR)/patchjna_packaging && $(BOOTJDK)/jar -xf ../../$$asm) || exit; done
+	@rm -rf $(OUTPUTDIR)/patchjna_packaging/META-INF
+	@python3 scripts/relocate_agent_asm.py $(OUTPUTDIR)/patchjna_packaging
 	@echo "Creating $@"
-	@$(BOOTJDK)/jar -cfm $@ $(SOURCEDIR)/patchjna_agent.txt -C $(basename $@) .
+	@$(BOOTJDK)/jar -cfm $@ $(SOURCEDIR)/patchjna_agent.txt -C $(OUTPUTDIR)/patchjna_packaging .
 
 clean:
 	rm -rf $(OUTPUTDIR)

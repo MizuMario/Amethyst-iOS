@@ -19,10 +19,22 @@
 #import "MinecraftOptionUtils.h"
 #import "PLLogOutputView.h"
 #import "PLProfiles.h"
+#import "HostManagerBridge.h"
+#include <sys/sysctl.h>
 
 #define fm NSFileManager.defaultManager
 
 extern char **environ;
+
+static NSString *launcherCPUDisplayName(void) {
+    char name[256] = {0};
+    size_t size = sizeof(name) - 1;
+    if (sysctlbyname("machdep.cpu.brand_string", name, &size, NULL, 0) == 0 && name[0]) {
+        return @(name);
+    }
+    NSString *model = [HostManager GetModelName] ?: [HostManager GetModelIdentifier];
+    return model.length ? [NSString stringWithFormat:@"ARM64 (%@)", model] : @"ARM64";
+}
 
 BOOL validateVirtualMemorySpace(size_t size) {
     size <<= 20; // convert to MB
@@ -72,15 +84,18 @@ void init_loadCustomEnv() {
     }
 }
 
-void init_loadCustomJvmFlags(int* argc, const char** argv) {
-    NSString *jvmargs = [PLProfiles resolveKeyForCurrentProfile:@"javaArgs"];
+void init_loadCustomJvmFlags(int* argc, const char** argv, BOOL launchJar) {
+    NSDictionary *profile = launchJar ? nil : PLProfiles.current.selectedProfile;
+    NSString *jvmargs = [profile[@"javaArgsOverride"] boolValue] ? profile[@"javaArgs"]
+        : (launchJar ? getPrefObject(@"java.java_args") : [PLProfiles resolveKeyForCurrentProfile:@"javaArgs"]);
     if (jvmargs == nil) return;
-    // Make the separator happy
+    jvmargs = [[jvmargs componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]
+        componentsJoinedByString:@" "];
     jvmargs = [jvmargs stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
     jvmargs = [@" " stringByAppendingString:jvmargs];
 
     NSLog(@"[JavaLauncher] Reading custom JVM flags");
-    NSArray *argsToPurge = @[@"Xms", @"Xmx", @"d32", @"d64"];
+    NSArray *argsToPurge = @[@"Xms", @"Xmx", @"XX:MaxHeapSize=", @"XX:InitialHeapSize=", @"d32", @"d64"];
     for (NSString *arg in [jvmargs componentsSeparatedByString:@" -"]) {
         NSString *jvmarg = [arg stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
         if (jvmarg.length == 0) continue;
@@ -157,16 +172,6 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
     BOOL isMinecraft26 = NO;
     NSCAssert(launchTarget, @"Unexpected nil launchTarget");
     if ([launchTarget isKindOfClass:NSDictionary.class]) {
-        // Get preferred Java version from current profile
-        int preferredJavaVersion = [PLProfiles resolveKeyForCurrentProfile:@"javaVersion"].intValue;
-        if (preferredJavaVersion > 0) {
-            if (minVersion > preferredJavaVersion) {
-                NSLog(@"[JavaLauncher] Profile's preferred Java version (%d) does not meet the minimum version (%d), dropping request", preferredJavaVersion, minVersion);
-            } else {
-                NSDebugLog(@"[PLProfiles] Applying javaVersion");
-                minVersion = preferredJavaVersion;
-            }
-        }
         if (minVersion >= 25) {
             defaultJRETag = @"1_26_newer";
         } else if (minVersion <= 8) {
@@ -204,9 +209,14 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
         // Setup RENDERER
         NSString *renderer = [PLProfiles resolveKeyForCurrentProfile:@"renderer"];
         NSString *versionId = [launchTarget[@"id"] isKindOfClass:NSString.class] ? launchTarget[@"id"] : @"";
-        if ([versionId hasPrefix:@"26."]) {
+        NSString *baseVersion = launchTarget[@"inheritsFrom"] ?: versionId;
+        BOOL nativeVulkan = [baseVersion hasPrefix:@"26."] || [versionId hasPrefix:@"26."];
+        if (!nativeVulkan && [renderer isEqualToString:@ RENDERER_NAME_MOLTENVK]) {
+            renderer = @"auto";
+        }
+        if (nativeVulkan) {
             isMinecraft26 = YES;
-            if ([renderer isEqualToString:@"auto"]) {
+            if (!ame_renderer_is_vulkan_native(ame_renderer_from_name(renderer.UTF8String))) {
                 renderer = @ RENDERER_NAME_MOLTENVK;
                 NSLog(@"[Vulkan] Minecraft %@ requires Vulkan; selected MoltenVK", versionId);
             }
@@ -214,17 +224,27 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
         NSLog(@"[JavaLauncher] RENDERER is set to %@\n", renderer);
         setenv("RENDERER", renderer.UTF8String, 1);
         // Setup gameDir
-        gameDir = [NSString stringWithFormat:@"%s/instances/%@/%@",
-            getenv("AME_HOME"), getPrefObject(@"general.game_directory"),
-            [PLProfiles resolveKeyForCurrentProfile:@"gameDir"]]
-            .stringByStandardizingPath;
+        NSError *directoryError;
+        gameDir = [PLProfiles.current gameDirectoryForProfile:PLProfiles.current.selectedProfileName create:YES error:&directoryError];
+        if (!gameDir) {
+            showDialog(localize(@"Error", nil), directoryError.localizedDescription);
+            [PLLogOutputView handleExitCode:1];
+            return 1;
+        }
     } else {
         defaultJRETag = @"execute_jar";
         gameDir = @(getenv("GAME_DIR"));
         launchJar = YES;
     }
     NSLog(@"[JavaLauncher] Looking for Java %d or later", minVersion);
-    NSString *javaHome = getSelectedJavaHome(defaultJRETag, minVersion);
+    NSDictionary *javaProfile = launchJar ? nil : PLProfiles.current.selectedProfile;
+    NSString *requestedJava = javaProfile[@"javaVersion"];
+    NSString *javaHome = nil;
+    if (requestedJava.intValue >= minVersion && requestedJava.intValue > 0) {
+        javaHome = getJavaHomeForVersion(requestedJava);
+        if (!javaHome) NSLog(@"[JavaLauncher] Profile Java %@ is unavailable; using automatic selection", requestedJava);
+    }
+    if (!javaHome) javaHome = getSelectedJavaHome(defaultJRETag, minVersion);
 
     if (javaHome == nil) {
         UIKit_returnToSplitView();
@@ -248,7 +268,12 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
     NSLog(@"[JavaLauncher] JAVA_HOME has been set to %@", javaHome);
 
     int allocmem;
-    if (getPrefBool(@"java.auto_ram")) {
+    NSString *memoryMode = javaProfile[@"memoryMode"];
+    int profileMemory = [javaProfile[@"memoryMB"] intValue];
+    int maxProfileMemory = MAX(250, (int)((NSProcessInfo.processInfo.physicalMemory / 1048576) * 0.85));
+    if ([memoryMode isEqualToString:@"manual"] && profileMemory >= 250 && profileMemory <= maxProfileMemory) {
+        allocmem = profileMemory;
+    } else if ([memoryMode isEqualToString:@"auto"] || getPrefBool(@"java.auto_ram")) {
         CGFloat autoRatio = getEntitlementValue(@"com.apple.private.memorystatus") ? 0.4 : 0.25;
         allocmem = roundf((NSProcessInfo.processInfo.physicalMemory >> 20) * autoRatio);
     } else {
@@ -316,6 +341,11 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
     }
 
     NSString *librariesPath = [NSString stringWithFormat:@"%@/libs", NSBundle.mainBundle.bundlePath];
+    if (!launchJar && !isMinecraft26) {
+        NSString *name = launcherCPUDisplayName();
+        NSLog(@"[JavaLauncher] OSHI CPU fallback: %@", name);
+        margv[++margc] = [NSString stringWithFormat:@"-Damethyst.ios.cpuName=%@", name].UTF8String;
+    }
     margv[++margc] = [NSString stringWithFormat:@"-javaagent:%@/patchjna_agent.jar=", librariesPath].UTF8String;
     if(getPrefBool(@"general.cosmetica")) {
         margv[++margc] = [NSString stringWithFormat:@"-javaagent:%@/arc_dns_injector.jar=23.95.137.176", librariesPath].UTF8String;
@@ -439,20 +469,22 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
         NSLog(@"[JavaLauncher] LiveContainer mirrored cache: disabling JNA extraction");
     }
 
-    init_loadCustomJvmFlags(&margc, (const char **)margv);
+    init_loadCustomJvmFlags(&margc, (const char **)margv, launchJar);
     NSLog(@"[Init] Found JLI lib");
 
     NSString *classpath = [NSString stringWithFormat:@"%@/*", librariesPath];
     if (selectedLWJGL.folder.length) {
-        NSString *archive = [selectedLWJGL.nativeSubfolder isEqualToString:@"root"]
-            ? [NSString stringWithFormat:@"%@/lwjgl-%@.jar", librariesPath, selectedLWJGL.version]
-            : [NSString stringWithFormat:@"%@/%@/lwjgl-%@.jar", librariesPath, selectedLWJGL.nativeSubfolder, selectedLWJGL.version];
+        NSString *libraryDir = [selectedLWJGL.nativeSubfolder isEqualToString:@"root"]
+            ? librariesPath : [librariesPath stringByAppendingPathComponent:selectedLWJGL.nativeSubfolder];
+        NSString *archive = [libraryDir stringByAppendingPathComponent:[NSString stringWithFormat:@"lwjgl-%@.jar", selectedLWJGL.version]];
+        if (selectedLWJGL.hasSDL && !DeviceHasJITFlags(JIT_FLAG_FORCE_MIRRORED)) {
+            NSString *ffmArchive = [libraryDir stringByAppendingPathComponent:[NSString stringWithFormat:@"lwjgl-%@-ffm.jar", selectedLWJGL.version]];
+            if ([fm fileExistsAtPath:ffmArchive]) archive = ffmArchive;
+        }
+        NSLog(@"[LWJGL] Java archive: %@", archive.lastPathComponent);
         margv[++margc] = [NSString stringWithFormat:@"-Damethyst.lwjgl.jar=%@", archive].UTF8String;
+        classpath = [classpath stringByAppendingFormat:@":%@", archive];
         if (selectedLWJGL.hasSDL) margv[++margc] = "-Damethyst.hangwatchdog=true";
-    }
-    if (selectedLWJGL.folder.length) {
-        NSString *versionedLWJGL = [NSString stringWithFormat:@"%@/%@/lwjgl-%@.jar", librariesPath, selectedLWJGL.nativeSubfolder, selectedLWJGL.version];
-        classpath = [classpath stringByAppendingFormat:@":%@", versionedLWJGL];
     }
     if (launchJar) {
         classpath = [classpath stringByAppendingFormat:@":%@", launchTarget];

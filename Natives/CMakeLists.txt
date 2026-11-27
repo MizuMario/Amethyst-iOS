@@ -168,6 +168,7 @@ add_executable(AngelAuraAmethyst
   LauncherPrefManageJREViewController.m
   LauncherProfileEditorViewController.m
   LauncherProfilesViewController.m
+  LauncherInstanceImport.m
   LauncherSplitViewController.m
   MinecraftOptionUtils.m
   MinecraftResourceDownloadTask.m
@@ -193,6 +194,25 @@ add_executable(AngelAuraAmethyst
 
 if("${CMAKE_HOST_SYSTEM_NAME}" MATCHES "Linux|^GNU$|Android")
 target_sources(AngelAuraAmethyst PUBLIC non_darwin_utils.m)
+endif()
+
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+  set(PROFILE_SWIFT_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/LauncherProfileBrowser.swift")
+  file(GLOB PROFILE_SWIFT_COMPONENTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/LauncherSwiftUI/*.swift")
+  set(PROFILE_SWIFT_OBJECT "${CMAKE_CURRENT_BINARY_DIR}/LauncherProfileBrowser.o")
+  add_custom_command(OUTPUT "${PROFILE_SWIFT_OBJECT}"
+    COMMAND xcrun swiftc -target arm64-apple-ios${CMAKE_OSX_DEPLOYMENT_TARGET}
+      -sdk "${CMAKE_OSX_SYSROOT}" -parse-as-library -O -whole-module-optimization -emit-object
+      -module-name AmethystProfileUI "${PROFILE_SWIFT_SOURCE}" ${PROFILE_SWIFT_COMPONENTS} -o "${PROFILE_SWIFT_OBJECT}"
+    DEPENDS "${PROFILE_SWIFT_SOURCE}" ${PROFILE_SWIFT_COMPONENTS}
+    VERBATIM)
+  execute_process(COMMAND xcrun --find swiftc OUTPUT_VARIABLE PROFILE_SWIFTC OUTPUT_STRIP_TRAILING_WHITESPACE)
+  get_filename_component(PROFILE_SWIFT_BIN "${PROFILE_SWIFTC}" DIRECTORY)
+  target_sources(AngelAuraAmethyst PRIVATE "${PROFILE_SWIFT_OBJECT}")
+  target_compile_definitions(AngelAuraAmethyst PRIVATE AMETHYST_SWIFT_PROFILE_UI=1)
+  target_link_libraries(AngelAuraAmethyst PRIVATE
+    "-L${PROFILE_SWIFT_BIN}/../lib/swift/iphoneos" "-L${CMAKE_OSX_SYSROOT}/usr/lib/swift"
+    "-Wl,-rpath,/usr/lib/swift" "-framework SwiftUI")
 endif()
 
 target_link_libraries(AngelAuraAmethyst

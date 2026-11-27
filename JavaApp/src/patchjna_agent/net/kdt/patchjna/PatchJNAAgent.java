@@ -10,6 +10,7 @@ import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Label;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.commons.AdviceAdapter;
@@ -30,6 +31,14 @@ public class PatchJNAAgent implements ClassFileTransformer {
                 e.printStackTrace();
             }
         }
+        if ("oshi/util/platform/mac/SysctlUtil".equals(className)
+                && System.getProperty("amethyst.ios.cpuName") != null) {
+            try {
+                transformeredByteCode = patchCPUName(transformeredByteCode);
+            } catch (RuntimeException e) {
+                System.err.println("[OSHI] CPU name fallback could not be installed: " + e);
+            }
+        }
         if ("com/mojang/renderpearl/frontend/shaders/GlslCompiler".equals(className)
                 && Boolean.getBoolean("amethyst.shaderc.disableDebugInfo")) {
             try {
@@ -41,6 +50,35 @@ public class PatchJNAAgent implements ClassFileTransformer {
             }
         }
         return transformeredByteCode;
+    }
+
+    private static byte[] patchCPUName(byte[] bytes) {
+        ClassReader reader = new ClassReader(bytes);
+        ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        reader.accept(new ClassVisitor(Opcodes.ASM9, writer) {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
+                MethodVisitor method = super.visitMethod(access, name, descriptor, signature, exceptions);
+                if (!name.equals("sysctl") || !descriptor.equals("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;")) {
+                    return method;
+                }
+                return new AdviceAdapter(Opcodes.ASM9, method, access, name, descriptor) {
+                    @Override
+                    protected void onMethodEnter() {
+                        Label original = new Label();
+                        push("machdep.cpu.brand_string");
+                        loadArg(0);
+                        invokeVirtual(Type.getType(String.class), new Method("equals", "(Ljava/lang/Object;)Z"));
+                        ifZCmp(EQ, original);
+                        push("amethyst.ios.cpuName");
+                        invokeStatic(Type.getType(System.class), new Method("getProperty", "(Ljava/lang/String;)Ljava/lang/String;"));
+                        returnValue();
+                        mark(original);
+                    }
+                };
+            }
+        }, ClassReader.EXPAND_FRAMES);
+        return writer.toByteArray();
     }
 
     // Replace the optional debug-info call with POP2 + two NOPs. This consumes

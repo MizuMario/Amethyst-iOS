@@ -34,11 +34,11 @@
 {
     self.getPreference = ^id(NSString *section, NSString *key){
         NSString *keyFull = [NSString stringWithFormat:@"%@.%@", section, key];
-        return getPrefObject(keyFull);
+        return getPrefObject([key isEqualToString:@"isolate_instance_preferences"] ? @"internal.isolated" : keyFull);
     };
     self.setPreference = ^(NSString *section, NSString *key, id value){
         NSString *keyFull = [NSString stringWithFormat:@"%@.%@", section, key];
-        setPrefObject(keyFull, value);
+        if (![key isEqualToString:@"isolate_instance_preferences"]) setPrefObject(keyFull, value);
     };
     
     self.hasDetail = YES;
@@ -338,6 +338,14 @@
                 @"type": self.typeTextField,
                 @"enableCondition": whenNotInGame
             },
+            @{@"key": @"increased_memory_limit_status",
+              @"title": getEntitlementValue(@"com.apple.developer.kernel.increased-memory-limit")
+                ? @"Increased Memory Limit：有効" : @"Increased Memory Limit：無効",
+              @"icon": @"memorychip",
+              @"type": [^(UITableViewCell *cell, NSString *section, NSString *key, NSDictionary *item) {
+                  cell.accessibilityTraits |= UIAccessibilityTraitStaticText;
+              } copy]
+            },
             @{@"key": @"auto_ram",
                 @"hasDetail": @YES,
                 @"icon": @"slider.horizontal.3",
@@ -404,6 +412,43 @@
         ]
     ];
 
+    // These launcher tools use the existing document picker and control editor.
+    __weak typeof(self) weakSelf = self;
+    NSMutableArray *general = [self.prefContents.firstObject mutableCopy];
+    [general insertObject:@{
+        @"key": @"execute_jar", @"title": @"launcher.menu.execute_jar",
+        @"icon": @"doc.badge.plus", @"type": self.typeButton, @"opensScreen": @YES,
+        @"enableCondition": whenNotInGame,
+        @"action": ^{ [[weakSelf launcherNavigation] enterModInstaller]; }
+    } atIndex:1];
+    if (realUIIdiom != UIUserInterfaceIdiomTV) {
+        [general insertObject:@{
+            @"key": @"custom_controls", @"title": @"launcher.menu.custom_controls",
+            @"icon": @"gamecontroller", @"type": self.typeButton, @"opensScreen": @YES,
+            @"enableCondition": whenNotInGame,
+            @"action": ^{ [[weakSelf launcherNavigation] enterCustomControls]; }
+        } atIndex:2];
+    }
+    [general insertObject:@{
+        @"key": @"isolate_instance_preferences", @"title": @"profile.title.separate_preference",
+        @"icon": @"folder.badge.gearshape", @"type": self.typeSwitch,
+        @"enableCondition": ^BOOL { return whenNotInGame() && !getenv("DEMO_LOCK"); },
+        @"action": ^(BOOL enabled) {
+            setPrefBool(@"internal.isolated", enabled);
+            toggleIsolatedPref(enabled);
+        }
+    } atIndex:1];
+    NSMutableArray *sections = [self.prefContents mutableCopy];
+    sections[0] = general;
+    self.prefContents = sections;
+
+    NSUInteger category = self.launcherSection ? [self.prefSections indexOfObject:self.launcherSection] : NSNotFound;
+    if (category != NSNotFound) {
+        self.prefContents = @[self.prefContents[category]];
+        self.prefSections = @[self.launcherSection];
+        self.prefSectionsVisible = YES;
+    }
+
     [super viewDidLoad];
     if (self.navigationController == nil) {
         self.tableView.alpha = 0.9;
@@ -414,6 +459,13 @@
         [closeButton addTarget:self action:@selector(actionClose) forControlEvents:UIControlEventTouchUpInside];
         [self.view addSubview:closeButton];
     }
+}
+
+- (LauncherNavigationController *)launcherNavigation {
+    UINavigationController *navigation = self.navigationController;
+    if ([navigation isKindOfClass:LauncherNavigationController.class]) return (id)navigation;
+    UIViewController *detail = sidebarViewController.splitViewController.viewControllers.lastObject;
+    return [detail isKindOfClass:LauncherNavigationController.class] ? (id)detail : nil;
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -430,7 +482,7 @@
 #pragma mark UITableView
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    if (section == 0) { // Add to general section
+    if ([self.prefSections[section] isEqualToString:@"general"]) {
         return [NSString stringWithFormat:@"Angel Aura Amethyst %@-%s (%s/%s)\n%@ on %@ (%s)\nPID: %d",
             NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"],
             CONFIG_TYPE, CONFIG_BRANCH, CONFIG_COMMIT,

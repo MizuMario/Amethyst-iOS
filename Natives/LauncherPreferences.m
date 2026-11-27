@@ -1,5 +1,6 @@
 #import "config.h"
 #import "utils.h"
+#import "renderer_info.h"
 #import "LauncherPreferences.h"
 #import "PLPreferences.h"
 #import "UIKit+hook.h"
@@ -102,24 +103,26 @@ NSString* getSelectedJavaHome(NSString* defaultJRETag, int minVersion) {
     NSDictionary *pref = getPrefObject(@"java.java_homes");
     NSDictionary<NSString *, NSString *> *selected = pref[@"0"];
     NSString *selectedVer = selected[defaultJRETag];
-    if (minVersion > selectedVer.intValue) {
-        NSArray *sortedVersions = [pref.allKeys valueForKeyPath:@"self.integerValue"];
-        sortedVersions = [sortedVersions sortedArrayUsingSelector:@selector(compare:)];
-        for (NSNumber *version in sortedVersions) {
-            if (version.intValue >= minVersion) {
-                selectedVer = version.stringValue;
-                break;
-            }
-        }
-        if (!selectedVer) {
-            NSLog(@"Error: requested Java >= %d was not installed!", minVersion);
-            return nil;
+    NSString *home = selectedVer.intValue >= minVersion ? getJavaHomeForVersion(selectedVer) : nil;
+    if (home) return home;
+
+    NSArray<NSString *> *versions = [pref.allKeys sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
+    for (NSString *version in versions) {
+        if (version.intValue >= minVersion && version.intValue > 0) {
+            home = getJavaHomeForVersion(version);
+            if (home) return home;
         }
     }
+    NSLog(@"Error: requested Java >= %d was not installed!", minVersion);
+    return nil;
+}
 
-    id selectedDir = pref[selectedVer];
+NSString *getJavaHomeForVersion(NSString *version) {
+    NSDictionary *homes = getPrefObject(@"java.java_homes");
+    NSString *selectedDir = version.length ? homes[version] : nil;
+    if (![selectedDir isKindOfClass:NSString.class] || !selectedDir.length) return nil;
     if ([selectedDir isEqualToString:@"internal"]) {
-        selectedDir = [NSString stringWithFormat:@"%@/java_runtimes/java-%@-openjdk", NSBundle.mainBundle.bundlePath, selectedVer];
+        selectedDir = [NSString stringWithFormat:@"%@/java_runtimes/java-%@-openjdk", NSBundle.mainBundle.bundlePath, version];
     } else {
         selectedDir = [NSString stringWithFormat:@"%s/java_runtimes/%@", getenv("AME_HOME"), selectedDir];
     }
@@ -127,7 +130,7 @@ NSString* getSelectedJavaHome(NSString* defaultJRETag, int minVersion) {
     if ([NSFileManager.defaultManager fileExistsAtPath:selectedDir]) {
         return selectedDir;
     } else {
-        NSLog(@"Error: selected runtime for %@ does not exist: %@", defaultJRETag, selectedDir);
+        NSLog(@"Error: Java %@ runtime does not exist: %@", version, selectedDir);
         return nil;
     }
 }
@@ -139,7 +142,8 @@ NSArray* getRendererKeys(BOOL containsDefault) {
         @ RENDERER_NAME_GL4ES,
         @ RENDERER_NAME_MTL_ANGLE,
         @ RENDERER_NAME_MOBILEGLUES,
-        @ RENDERER_NAME_VK_ZINK
+        @ RENDERER_NAME_VK_ZINK,
+        @ RENDERER_NAME_MOLTENVK
     ].mutableCopy;
 
     if (containsDefault) {
@@ -157,7 +161,8 @@ NSArray* getRendererNames(BOOL containsDefault) {
         localize(@"preference.title.renderer.debug.gl4es", nil),
         localize(@"preference.title.renderer.debug.angle", nil),
         localize(@"preference.title.renderer.debug.mg", nil),
-        localize(@"preference.title.renderer.debug.zink", nil)
+        localize(@"preference.title.renderer.debug.zink", nil),
+        @"Vulkan (MoltenVK, Minecraft 26.x)"
     ].mutableCopy;
 
     if (containsDefault) {
