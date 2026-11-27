@@ -1,11 +1,10 @@
 # Angel Aura Amethyst (iOS)
-[![Development build](https://github.com/AngelAuraMC/Amethyst-iOS/actions/workflows/development.yml/badge.svg?branch=main)](https://github.com/AngelAuraMC/Amethyst-iOS/actions/workflows/development.yml)
-[![Crowdin](https://badges.crowdin.net/angelauramc/localized.svg)](https://crowdin.com/project/angelauramc)
-[![Discord](https://img.shields.io/discord/724163890803638273.svg?label=&logo=discord&logoColor=ffffff&color=7389D8&labelColor=6A7EC2)](https://discord.gg/5ptqkyZxEy)
+[![Development build](https://github.com/AngelAuraMC/Amethyst-iOS/actions/workflows/development.yml/badge.svg?branch=main)](https://github.com/MizuMario/Amethyst-iOS/actions/workflows/development.yml)
 
+[日本語](https://github.com/MizuMario/Amethyst-iOS/ReadMe/ja_JP.md)
 
 ## Warning
-This repository contains unofficial builds. 
+This repository contains unofficial builds.
 
 ## Introduction
 Amethyst is a Minecraft: Java Edition launcher for Android, iOS, and iPadOS, based off of zhuowei's [Boardwalk](https://github.com/zhuowei/Boardwalk) project.
