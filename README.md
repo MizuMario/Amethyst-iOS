@@ -1,7 +1,7 @@
 # Angel Aura Amethyst (iOS)
 [![Development build](https://github.com/AngelAuraMC/Amethyst-iOS/actions/workflows/development.yml/badge.svg?branch=main)](https://github.com/MizuMario/Amethyst-iOS/actions/workflows/development.yml)
 
-[日本語](https://github.com/MizuMario/Amethyst-iOS/ReadMe/ja_JP.md)
+[日本語](https://github.com/MizuMario/Amethyst-iOS/blob/main/ReadMe/ja_JP.md)
 
 ## Warning
 This repository contains unofficial builds.
